@@ -1,0 +1,381 @@
+
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+        <meta charset="UTF-8">
+        <title>Repo: pe.siro_phan</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+            :root { --primary: #fe2c55; --bg: #121212; --card-bg: #1e1e1e; --sidebar-bg: #000; --text: #fff; --text-sub: #888; --sidebar-width: 260px; }
+            body { background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; }
+            
+            /* === SIDEBAR === */
+            .sidebar { 
+                width: var(--sidebar-width); 
+                background: var(--sidebar-bg); 
+                border-right: 1px solid #333; 
+                display: flex; flex-direction: column; 
+                transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+                position: fixed; top: 0; bottom: 0; left: 0; 
+                z-index: 2000; 
+                transform: translateX(-100%); 
+                box-shadow: 2px 0 10px rgba(0,0,0,0.5);
+            }
+            .sidebar.expanded { transform: translateX(0); }
+            
+            .sidebar-toggle-arrow {
+                position: absolute; top: 70px; right: -32px;
+                width: 32px; height: 40px;
+                background: var(--primary); color: #fff;
+                border: none; border-radius: 0 6px 6px 0;
+                cursor: pointer; display: flex; align-items: center; justify-content: center;
+                font-size: 18px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); z-index: 2001;
+            }
+            .sidebar-toggle-arrow:hover { filter: brightness(1.1); }
+
+            .sidebar-header { padding: 15px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #111; }
+            .sidebar-title { font-weight: bold; color: var(--primary); font-size: 1.1em; }
+            
+            .date-list { flex-grow: 1; overflow-y: auto; padding: 10px; -webkit-overflow-scrolling: touch; }
+            .date-item { padding: 12px 10px; margin-bottom: 2px; cursor: pointer; border-radius: 4px; font-size: 0.95em; color: #ccc; display: flex; justify-content: space-between; border-bottom: 1px solid #222; }
+            .date-item:hover, .date-item:active { background: #222; color: #fff; }
+            .date-count { background: #333; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; min-width: 20px; text-align: center; }
+
+            /* MAIN CONTENT */
+            .main-container { 
+                flex-grow: 1; display: flex; flex-direction: column; height: 100%; margin-left: 0; width: 100%; transition: margin-left 0.3s ease; 
+            }
+            
+            .controls { background: #181818; padding: 10px; border-bottom: 1px solid #333; z-index: 100; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+            .top-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+            .stats { font-size: 0.9em; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            
+            .nav-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+            .nav-group { display: flex; gap: 5px; background: #222; padding: 4px; border-radius: 6px; align-items: center; }
+            
+            input, select, button { padding: 8px; border-radius: 6px; border: 1px solid #444; background: #2f2f2f; color: white; font-size: 14px; outline: none; }
+            input:focus, select:focus { border-color: var(--primary); }
+            button { cursor: pointer; background: #444; font-weight: bold; }
+            button:active { background: #666; }
+            
+            .btn-primary { background: var(--primary); border: none; }
+            .btn-go { width: 40px; text-align: center; padding: 8px 0; }
+            .btn-action { min-width: 60px; }
+            .btn-danger { background: #822; border: none; }
+
+            .scroll-area { flex-grow: 1; overflow-y: auto; padding: 10px; -webkit-overflow-scrolling: touch; background: #000; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
+            
+            /* CARD DESIGN */
+            .card { background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid #333; position: relative; display: flex; flex-direction: column; transition: 0.2s; }
+            .card:hover { transform: translateY(-3px); border-color: var(--primary); }
+            .card.highlight { border: 2px solid #ffee00; box-shadow: 0 0 15px rgba(255, 238, 0, 0.5); z-index: 10; }
+
+            .thumb-link { display: block; position: relative; padding-top: 140%; background: #111; }
+            .thumb { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 0.3s; opacity: 0; }
+            .thumb.loaded { opacity: 1; }
+            
+            .info { padding: 12px; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; }
+            
+            .nickname { font-weight: bold; font-size: 1rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .uid { font-size: 0.85em; color: var(--text-sub); display: block; margin-bottom: 4px; }
+            .date { color: var(--primary); font-size: 0.9em; font-weight: bold; margin-bottom: 4px; }
+            .desc { font-size: 0.9em; color: #ddd; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; height: 2.8em; margin: 6px 0; line-height: 1.4; }
+            
+            .metrics { font-size: 0.8em; color: var(--text-sub); display: flex; gap: 12px; border-top: 1px solid #333; padding-top: 8px; margin-top: auto; }
+            .cursor-badge { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 4px 8px; font-size: 12px; border-radius: 4px; z-index: 10; font-weight: bold; pointer-events: none; }
+
+            #loadingMsg { text-align: center; padding: 20px; color: #666; width: 100%; grid-column: 1 / -1; }
+
+            @media (max-width: 768px) {
+                .grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+                .controls { gap: 8px; }
+                .nav-bar { flex-wrap: wrap; }
+                .input-group { flex-grow: 1; }
+                .nickname { font-size: 0.9rem; }
+                .metrics { font-size: 0.75em; gap: 8px; }
+                .sidebar-toggle-arrow { height: 50px; width: 36px; font-size: 20px; top: 60px; }
+            }
+        </style>
+    </head>
+    <body>
+    
+    <div id="sidebar" class="sidebar">
+        <button class="sidebar-toggle-arrow" id="sidebarToggle" onclick="toggleSidebar()">▶</button>
+        <div class="sidebar-header">
+            <span class="sidebar-title">📅 Lịch Sử</span>
+        </div>
+        <div id="dateList" class="date-list"></div>
+    </div>
+    
+    <div id="mainContainer" class="main-container">
+        <div class="controls">
+            <div class="top-bar">
+                <div class="stats">
+                    <span style="color:#fe2c55; font-weight:bold;">pe.siro_phan</span> 
+                    (<span id="totalCount">0</span>)
+                </div>
+            </div>
+            
+            <div class="nav-bar">
+                <div class="nav-group" style="flex-grow: 2;">
+                    <input type="text" id="searchInput" placeholder="🔍 Tìm kiếm..." style="width: 100%;">
+                </div>
+                <div class="nav-group" style="flex-grow: 1;">
+                    <select id="sortSelect" style="width: 100%;">
+                        <option value="feed">Thứ tự Repost</option>
+                        <option value="newest_create">Mới tạo nhất</option>
+                        <option value="oldest_create">Cũ nhất</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="nav-bar">
+                <div class="nav-group">
+                    <input type="number" id="jumpInput" placeholder="#" style="width: 60px;">
+                    <button onclick="jumpTo()" class="btn-primary btn-go">Go</button>
+                </div>
+                <div class="nav-group">
+                    <button onclick="scrollOffset(-300)" class="btn-action" title="Cuộn lên 300">-300</button>
+                    <button onclick="scrollOffset(300)" class="btn-action" title="Cuộn xuống 300">+300</button>
+                </div>
+                <div class="nav-group">
+                    <button onclick="renderAll()" class="btn-danger">Hiện tất cả</button>
+                    <button onclick="scrollToTop()">⬆️ Đầu</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="scroll-area" id="scrollArea">
+            <div class="grid" id="videoGrid"></div>
+            <div id="loadingMsg">Đang tải data...</div>
+        </div>
+    </div>
+
+    <!-- SỬ DỤNG TIMESTAMP ĐỂ TRÁNH CACHE JS -->
+    <script src="data_pe.siro_phan.js?t=1767380927"></script>
+    
+    <script>
+        const grid = document.getElementById('videoGrid');
+        const scrollArea = document.getElementById('scrollArea');
+        const searchInput = document.getElementById('searchInput');
+        const sortSelect = document.getElementById('sortSelect');
+        const dateListEl = document.getElementById('dateList');
+        const loadingMsg = document.getElementById('loadingMsg');
+        const jumpInput = document.getElementById('jumpInput');
+        const sidebar = document.getElementById('sidebar');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        
+        let fullData = [];
+        let displayData = [];
+        
+        let renderedStart = 0;
+        let renderedEnd = 0;
+        const BATCH_SIZE = 40; 
+
+        // === LOGIC LOAD DATA AN TOÀN ===
+        if (window.tiktokData && Array.isArray(window.tiktokData)) {
+            fullData = window.tiktokData;
+            startApp();
+        } else {
+            fetch('data_pe.siro_phan.json')
+                .then(res => res.json())
+                .then(data => {
+                    if (data && !Array.isArray(data)) {
+                        fullData = Object.values(data).sort((a, b) => (a.feed_index || 9e9) - (b.feed_index || 9e9));
+                    } else if (Array.isArray(data)) {
+                        fullData = data;
+                    }
+                    startApp();
+                })
+                .catch(err => {
+                    loadingMsg.innerHTML = "❌ Lỗi: Không tải được dữ liệu!<br>Hãy chắc chắn file <b>data_pe.siro_phan.js</b> hoặc <b>data_pe.siro_phan.json</b> nằm cùng thư mục.";
+                    console.error(err);
+                });
+        }
+
+        function startApp() {
+            document.getElementById('totalCount').innerText = fullData.length;
+            displayData = [...fullData];
+            renderSidebar();
+            resetRender();
+            renderDown(); 
+            scrollArea.addEventListener('scroll', onScroll);
+        }
+
+        function toggleSidebar() {
+            sidebar.classList.toggle('expanded');
+            if (sidebar.classList.contains('expanded')) {
+                sidebarToggle.innerHTML = '◀';
+            } else {
+                sidebarToggle.innerHTML = '▶';
+            }
+        }
+
+        function resetRender() {
+            grid.innerHTML = '';
+            renderedStart = 0;
+            renderedEnd = 0;
+        }
+
+        function createCard(v) {
+            const el = document.createElement('div');
+            el.className = 'card';
+            el.id = 'card-' + v.id;
+            const descText = (v.desc || '').replace(/"/g, '&quot;');
+            el.innerHTML = `
+                <a href="https://www.tiktok.com/@${v.uniqueId}/video/${v.id}" target="_blank" class="thumb-link">
+                    <span class="cursor-badge">#${v.feed_index}</span>
+                    <img src="${v.cover}" class="thumb" onload="this.classList.add('loaded')" loading="lazy">
+                </a>
+                <div class="info">
+                    <div class="date">📅 ${v.date}</div>
+                    <span class="nickname">${v.nickname}</span>
+                    <span class="uid">@${v.uniqueId}</span>
+                    <div class="desc" title="${descText}">${v.desc || ''}</div>
+                    <div class="metrics">
+                        <span>❤️ ${v.digg}</span>
+                        <span>💬 ${v.comment}</span>
+                        <span>🔄 ${v.share}</span>
+                    </div>
+                </div>
+            `;
+            return el;
+        }
+
+        function onScroll() {
+            const st = scrollArea.scrollTop;
+            const sh = scrollArea.scrollHeight;
+            const ch = scrollArea.clientHeight;
+
+            if (st + ch >= sh - 600) renderDown();
+            if (st <= 200 && renderedStart > 0) renderUp();
+        }
+
+        function renderDown(forceCount = -1) {
+            if (renderedEnd >= displayData.length) {
+                loadingMsg.style.display = 'none';
+                return;
+            }
+            let count = (forceCount > -1) ? forceCount : BATCH_SIZE;
+            let end = Math.min(renderedEnd + count, displayData.length);
+            const batch = displayData.slice(renderedEnd, end);
+            const fragment = document.createDocumentFragment();
+            batch.forEach(v => fragment.appendChild(createCard(v)));
+            grid.appendChild(fragment);
+            renderedEnd = end;
+            if (renderedEnd >= displayData.length) loadingMsg.style.display = 'none';
+            else loadingMsg.style.display = 'block';
+        }
+
+        function renderUp() {
+            if (renderedStart <= 0) return;
+            const oldScrollHeight = scrollArea.scrollHeight;
+            const oldScrollTop = scrollArea.scrollTop;
+            let count = BATCH_SIZE;
+            let start = Math.max(0, renderedStart - count);
+            const batch = displayData.slice(start, renderedStart);
+            const fragment = document.createDocumentFragment();
+            batch.forEach(v => fragment.appendChild(createCard(v)));
+            grid.insertBefore(fragment, grid.firstChild);
+            renderedStart = start;
+            const newScrollHeight = scrollArea.scrollHeight;
+            scrollArea.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+        }
+
+        function renderAll() {
+            if (!confirm("⚠️ CẢNH BÁO: Hiển thị toàn bộ " + displayData.length + " video cùng lúc có thể làm trình duyệt bị đơ/lag.\\n\\nBạn có muốn tiếp tục không?")) return;
+            loadingMsg.innerText = "Đang render toàn bộ...";
+            setTimeout(() => {
+                renderDown(displayData.length - renderedEnd);
+            }, 50);
+        }
+
+        function scrollOffset(amount) {
+            const cardHeight = 360; 
+            const cols = Math.floor(grid.clientWidth / 280) || 1;
+            const rowsToScroll = Math.ceil(Math.abs(amount) / cols);
+            const pxToScroll = rowsToScroll * cardHeight;
+
+            if (amount > 0) {
+                renderDown(amount);
+                setTimeout(() => {
+                    scrollArea.scrollBy({ top: pxToScroll, behavior: 'smooth' });
+                }, 50);
+            } else {
+                scrollArea.scrollBy({ top: -pxToScroll, behavior: 'smooth' });
+            }
+        }
+
+        function jumpToId(vid) {
+            const index = displayData.findIndex(v => v.id === vid);
+            if (index === -1) { alert("Video ẩn!"); return; }
+            grid.innerHTML = '';
+            renderedStart = Math.max(0, index - 20); 
+            renderedEnd = renderedStart; 
+            renderDown(50);
+            setTimeout(() => {
+                const el = document.getElementById('card-' + vid);
+                if (el) {
+                    el.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    el.classList.add('highlight');
+                    setTimeout(() => el.classList.remove('highlight'), 2000);
+                }
+            }, 50);
+        }
+
+        function jumpTo() {
+            const targetIndex = parseInt(jumpInput.value);
+            if (isNaN(targetIndex)) return;
+            const targetVid = displayData.find(v => v.feed_index == targetIndex);
+            if (targetVid) jumpToId(targetVid.id);
+        }
+
+        function scrollToTop() {
+            resetRender();
+            renderDown();
+            scrollArea.scrollTop = 0;
+        }
+        
+        function renderSidebar() {
+            const dateMap = {};
+            fullData.forEach(v => { if (!dateMap[v.date]) dateMap[v.date] = []; dateMap[v.date].push(v); });
+            const sortedDates = Object.keys(dateMap).sort((a, b) => b.localeCompare(a));
+            dateListEl.innerHTML = sortedDates.map(date => 
+                `<div class="date-item" onclick="scrollToDate('${date}')">
+                    <span>${date}</span><span class="date-count">${dateMap[date].length}</span>
+                </div>`
+            ).join('');
+        }
+
+        window.scrollToDate = function(dateStr) {
+            if (window.innerWidth < 768) toggleSidebar(); 
+            const videosOfDate = fullData.filter(v => v.date === dateStr);
+            if (videosOfDate.length === 0) return;
+            videosOfDate.sort((a, b) => (BigInt(a.id) > BigInt(b.id)) ? 1 : -1);
+            jumpToId(videosOfDate[0].id);
+        };
+
+        function handleFilter() {
+            const term = searchInput.value.toLowerCase();
+            const sortMode = sortSelect.value;
+            resetRender();
+            loadingMsg.style.display = 'block';
+            displayData = fullData.filter(v => 
+                (v.nickname && v.nickname.toLowerCase().includes(term)) || 
+                (v.date && v.date.includes(term)) ||
+                (v.desc && v.desc.toLowerCase().includes(term)) ||
+                (v.uniqueId && v.uniqueId.toLowerCase().includes(term))
+            );
+            if (sortMode === 'feed') displayData.sort((a, b) => (a.feed_index || 9e9) - (b.feed_index || 9e9));
+            if (sortMode === 'newest_create') displayData.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
+            if (sortMode === 'oldest_create') displayData.sort((a, b) => (BigInt(a.id) > BigInt(b.id)) ? 1 : -1);
+            renderDown();
+        }
+        
+        searchInput.addEventListener('input', () => { clearTimeout(window.searchTimer); window.searchTimer = setTimeout(handleFilter, 300); });
+        sortSelect.addEventListener('change', handleFilter);
+    </script>
+    </body>
+    </html>
+    
