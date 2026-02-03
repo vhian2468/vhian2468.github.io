@@ -1,9 +1,19 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import json
+import os
+import time
+import webbrowser
+from datetime import datetime
 
+# ================= HTML GENERATOR LOGIC (UPDATED FOR OFFLINE THUMBS) =================
+def generate_static_html(username, data_list):
+    html_template = r"""
     <!DOCTYPE html>
     <html lang="vi">
     <head>
         <meta charset="UTF-8">
-        <title>Repo: pe.siro_phan_all</title>
+        <title>Repo: __USERNAME__</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <style>
             :root { 
@@ -149,7 +159,7 @@
         <div class="controls">
             <div class="top-bar">
                 <div class="stats">
-                    <span style="color:#fe2c55; font-weight:bold;">pe.siro_phan_all</span> 
+                    <span style="color:#fe2c55; font-weight:bold;">__USERNAME__</span> 
                     (<span id="totalCount">0</span> items)
                 </div>
             </div>
@@ -199,7 +209,7 @@
     </div>
 
     <!-- SỬ DỤNG TIMESTAMP ĐỂ TRÁNH CACHE JS -->
-    <script src="data_pe.siro_phan_all.js?t=1770082432"></script>
+    <script src="data___USERNAME__.js?t=__TIMESTAMP__"></script>
     
     <script>
         const grid = document.getElementById('videoGrid');
@@ -521,4 +531,333 @@
     </script>
     </body>
     </html>
+    """
+    html_content = html_template.replace("__USERNAME__", username)
+    html_content = html_content.replace("__TIMESTAMP__", str(int(time.time())))
+    return html_content
+
+# ================= GUI APP =================
+class TikTokManagerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TikTok HTML Generator & Data Manager")
+        self.root.geometry("1000x600")
+        
+        self.data = {}
+        self.data_list = []
+        self.current_file = ""
+        self.username = ""
+        self.filtered_list = []
+        
+        # === LAYOUT ===
+        # Top Frame: Actions
+        self.top_frame = tk.Frame(root, bg="#eee", padx=10, pady=10)
+        self.top_frame.pack(fill="x")
+        
+        tk.Button(self.top_frame, text="📂 Chọn File JSON", command=self.load_file, bg="white").pack(side="left", padx=5)
+        self.lbl_file = tk.Label(self.top_frame, text="Chưa chọn file", bg="#eee", fg="#555")
+        self.lbl_file.pack(side="left", padx=5)
+        
+        tk.Button(self.top_frame, text="🛠 Tạo Repost Order", command=self.calc_repost_order, bg="#ffdddd").pack(side="right", padx=5)
+        
+        # NEW: AUTO FILL BUTTON
+        tk.Button(self.top_frame, text="⚡ Điền Ngày Repost", command=self.auto_fill_repost_dates, bg="#fff0dd").pack(side="right", padx=5)
+        
+        tk.Button(self.top_frame, text="🌐 Xuất HTML", command=self.export_html, bg="#ddffdd").pack(side="right", padx=5)
+
+        # Main PanedWindow (Split Left/Right)
+        self.paned = tk.PanedWindow(root, orient="horizontal")
+        self.paned.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # --- LEFT: LIST & SEARCH ---
+        self.left_frame = tk.Frame(self.paned)
+        self.paned.add(self.left_frame, width=600)
+        
+        # Search Bar (Fixed: No 'placeholder' arg)
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", self.on_search)
+        
+        # Dùng Label thay cho placeholder
+        tk.Label(self.left_frame, text="🔍 Tìm kiếm (ID, Caption, Date):").pack(anchor="w", padx=5)
+        tk.Entry(self.left_frame, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
+        
+        # Treeview (List)
+        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order"), show="headings")
+        self.tree.heading("feed_index", text="#")
+        self.tree.heading("date", text="Ngày tạo")
+        self.tree.heading("nickname", text="Nickname")
+        self.tree.heading("repost_date", text="Ngày Repost")
+        self.tree.heading("order", text="Ord")
+        
+        self.tree.column("feed_index", width=50)
+        self.tree.column("date", width=90)
+        self.tree.column("nickname", width=120)
+        self.tree.column("repost_date", width=90)
+        self.tree.column("order", width=50)
+        
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<<TreeviewSelect>>", self.on_select_item)
+        
+        # --- RIGHT: EDITOR ---
+        self.right_frame = tk.Frame(self.paned, bg="#f9f9f9", bd=1, relief="sunken")
+        self.paned.add(self.right_frame)
+        
+        tk.Label(self.right_frame, text="✏️ CHỈNH SỬA", font=("Arial", 12, "bold"), bg="#f9f9f9").pack(pady=10)
+        
+        # Form
+        self.form_frame = tk.Frame(self.right_frame, bg="#f9f9f9", padx=10)
+        self.form_frame.pack(fill="x")
+        
+        self.lbl_info = tk.Label(self.form_frame, text="Chọn 1 video bên trái...", bg="#f9f9f9", justify="left")
+        self.lbl_info.pack(anchor="w", pady=5)
+        
+        tk.Label(self.form_frame, text="Ngày Repost (YYYY-MM-DD):", bg="#f9f9f9").pack(anchor="w")
+        self.entry_repost_date = tk.Entry(self.form_frame)
+        self.entry_repost_date.pack(fill="x", pady=2)
+        # SỬA LỖI Ở ĐÂY: thay text_color thành fg
+        tk.Button(self.form_frame, text="Hôm nay", command=self.set_today, fg="blue", height=1).pack(anchor="e")
+        
+        tk.Label(self.form_frame, text="Repost Caption:", bg="#f9f9f9").pack(anchor="w", pady=(10, 0))
+        self.entry_repost_cap = tk.Entry(self.form_frame)
+        self.entry_repost_cap.pack(fill="x", pady=2)
+        
+        tk.Label(self.form_frame, text="Repost Order (Tự động):", bg="#f9f9f9").pack(anchor="w", pady=(10, 0))
+        self.entry_repost_order = tk.Entry(self.form_frame, state="readonly")
+        self.entry_repost_order.pack(fill="x", pady=2)
+
+        tk.Button(self.form_frame, text="💾 LƯU THAY ĐỔI", command=self.save_current_item, bg="#2196F3", fg="white", font=("Arial", 10, "bold"), pady=10).pack(fill="x", pady=20)
+        
+        self.btn_open_web = tk.Button(self.form_frame, text="🌐 Mở trên Web", command=self.open_in_browser)
+        self.btn_open_web.pack(fill="x")
+
+        self.selected_vid = None
+
+    def load_file(self):
+        filename = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
+        if not filename: return
+        
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+            
+            # --- TỰ ĐỘNG CHUẨN HÓA SANG LIST ---
+            if isinstance(raw_data, dict):
+                # Format cũ (Dict) -> Chuyển thành List
+                self.data_list = list(raw_data.values())
+            elif isinstance(raw_data, list):
+                # Format mới (List) -> Giữ nguyên
+                self.data_list = raw_data
+            else:
+                self.data_list = []
+
+            # Tạo Map Dict nội bộ để tìm kiếm nhanh theo ID
+            self.data = {v['id']: v for v in self.data_list if 'id' in v}
+            
+            # Extract username
+            base = os.path.basename(filename)
+            if base.startswith("data_") and base.endswith(".json"):
+                self.username = base[5:-5]
+            else:
+                self.username = "unknown"
+                
+            self.current_file = filename
+            self.lbl_file.config(text=f"User: {self.username} | {len(self.data_list)} videos")
+            
+            # Sort mặc định
+            self.data_list.sort(key=lambda x: x.get('feed_index', 999999))
+            
+            self.refresh_tree()
+            messagebox.showinfo("OK", "Đã tải dữ liệu thành công! (Tự động convert về List)")
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không đọc được file: {e}")
+
+    def refresh_tree(self):
+        # Clear tree
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        term = self.search_var.get().lower()
+        
+        self.filtered_list = []
+        for v in self.data_list:
+            # Search filter
+            match = False
+            if term in str(v.get('id', '')).lower(): match = True
+            if term in str(v.get('desc', '')).lower(): match = True
+            if term in str(v.get('nickname', '')).lower(): match = True
+            if term in str(v.get('repost_date', '')).lower(): match = True
+            
+            if not term or match:
+                self.filtered_list.append(v)
+                
+        # Insert to tree
+        for v in self.filtered_list:
+            self.tree.insert("", "end", values=(
+                v.get('feed_index', ''),
+                v.get('date', ''),
+                v.get('nickname', ''),
+                v.get('repost_date', ''),
+                v.get('repost_order', '')
+            ), tags=(v['id'],))
+
+    def on_search(self, *args):
+        self.refresh_tree()
+
+    def on_select_item(self, event):
+        sel = self.tree.selection()
+        if not sel: return
+        
+        # Get ID from tags
+        item_id = self.tree.item(sel[0], "tags")[0]
+        self.selected_vid = item_id
+        
+        v = self.data.get(item_id)
+        if not v: return
+        
+        # Fill Form
+        self.lbl_info.config(text=f"ID: {v['id']}\nNick: {v['nickname']}\nDate: {v['date']}\nDesc: {v['desc'][:50]}...")
+        
+        self.entry_repost_date.delete(0, tk.END)
+        self.entry_repost_date.insert(0, v.get('repost_date', ''))
+        
+        self.entry_repost_cap.delete(0, tk.END)
+        self.entry_repost_cap.insert(0, v.get('repost_caption', ''))
+        
+        self.entry_repost_order.config(state="normal")
+        self.entry_repost_order.delete(0, tk.END)
+        self.entry_repost_order.insert(0, v.get('repost_order', ''))
+        self.entry_repost_order.config(state="readonly")
+
+    def set_today(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.entry_repost_date.delete(0, tk.END)
+        self.entry_repost_date.insert(0, today)
+
+    def save_current_item(self):
+        if not self.selected_vid or self.selected_vid not in self.data: return
+        
+        v = self.data[self.selected_vid]
+        v['repost_date'] = self.entry_repost_date.get().strip()
+        v['repost_caption'] = self.entry_repost_cap.get().strip()
+        
+        # Update UI List
+        self.refresh_tree()
+        self.save_json_file()
+
+    def open_in_browser(self):
+        if not self.selected_vid: return
+        v = self.data[self.selected_vid]
+        url = f"https://www.tiktok.com/@{v['uniqueId']}/video/{v['id']}"
+        webbrowser.open(url)
+
+    def calc_repost_order(self):
+        if not self.data_list: return
+        
+        confirm = messagebox.askyesno("Xác nhận", "Tính toán lại Repost Order?\n\nLuật: Feed Index Cao Nhất (Video Cũ Nhất trong Feed) => Order = 1.")
+        if not confirm: return
+        
+        # 1. Sort list by feed_index DESC (Max to Min)
+        sorted_items = sorted(self.data_list, key=lambda x: x.get('feed_index', 0), reverse=True)
+        
+        # 2. Assign Order
+        for idx, item in enumerate(sorted_items):
+            item['repost_order'] = idx + 1
+            # Update main dict to ensure sync
+            self.data[item['id']]['repost_order'] = idx + 1
+            
+        self.refresh_tree()
+        self.save_json_file()
+        messagebox.showinfo("Thành công", f"Đã cập nhật thứ tự cho {len(sorted_items)} video!")
     
+    def auto_fill_repost_dates(self):
+        """
+        Tính năng: Tự động điền ngày repost cho các video nằm giữa 2 video có cùng ngày repost.
+        Dựa trên thứ tự Feed Index (từ 0 -> N).
+        """
+        if not self.data_list: return
+        
+        if not messagebox.askyesno("Xác nhận", "Tính năng này sẽ tìm các cặp video có cùng Ngày Repost\nvà tự động điền ngày đó cho TẤT CẢ video nằm giữa chúng.\n\nBạn có muốn tiếp tục?"):
+            return
+
+        # 1. Sắp xếp danh sách theo Feed Index (Tăng dần) để đảm bảo tính liền mạch
+        self.data_list.sort(key=lambda x: x.get('feed_index', 0))
+        
+        updates_count = 0
+        
+        # 2. Lấy danh sách chỉ mục (index) của các video ĐÃ CÓ repost_date
+        # indices_with_date chứa các index trong data_list
+        indices_with_date = [i for i, x in enumerate(self.data_list) if x.get('repost_date', '').strip()]
+
+        if len(indices_with_date) < 2:
+            messagebox.showinfo("Thông báo", "Cần ít nhất 2 video đã có ngày Repost để thực hiện tính năng này.")
+            return
+
+        # 3. Duyệt qua từng cặp anchor liền kề
+        for i in range(len(indices_with_date) - 1):
+            start_idx = indices_with_date[i]
+            end_idx = indices_with_date[i+1]
+
+            vid_start = self.data_list[start_idx]
+            vid_end = self.data_list[end_idx]
+            
+            date_start = vid_start.get('repost_date')
+            date_end = vid_end.get('repost_date')
+
+            # Nếu 2 mốc này có cùng ngày -> Điền cho tất cả video ở giữa
+            if date_start == date_end and date_start:
+                # Duyệt các video nằm giữa start_idx và end_idx
+                for k in range(start_idx + 1, end_idx):
+                    # Chỉ điền nếu chưa có ngày (hoặc ghi đè luôn để đảm bảo đồng bộ - ở đây chọn ghi đè)
+                    if self.data_list[k].get('repost_date') != date_start:
+                        self.data_list[k]['repost_date'] = date_start
+                        # Cập nhật cả vào self.data map
+                        vid_id = self.data_list[k]['id']
+                        if vid_id in self.data:
+                            self.data[vid_id]['repost_date'] = date_start
+                        updates_count += 1
+
+        if updates_count > 0:
+            self.refresh_tree()
+            self.save_json_file()
+            messagebox.showinfo("Hoàn tất", f"Đã tự động điền ngày cho {updates_count} video!")
+        else:
+            messagebox.showinfo("Thông báo", "Không tìm thấy khoảng trống nào giữa 2 video cùng ngày để điền.")
+
+    def export_html(self):
+        if not self.username: return
+        html = generate_static_html(self.username, self.data_list)
+        
+        html_file = f"view_{self.username}.html"
+        js_file = f"data_{self.username}.js"
+        
+        # Save JS
+        js_content = f"window.tiktokData = {json.dumps(self.data_list, ensure_ascii=False)};"
+        with open(js_file, "w", encoding="utf-8") as f:
+            f.write(js_content)
+            
+        # Save HTML
+        with open(html_file, "w", encoding="utf-8") as f:
+            f.write(html)
+            
+        messagebox.showinfo("Xuất HTML", f"Đã tạo xong:\n- {html_file}\n- {js_file}")
+        webbrowser.open(html_file)
+
+    def save_json_file(self):
+        if not self.current_file: return
+        try:
+            # --- FIX: LUÔN LƯU DẠNG LIST (JSON MỚI) ---
+            # Chuyển từ Dict map {ID: Obj} sang List [Obj, Obj] trước khi lưu
+            save_data = list(self.data.values())
+            
+            with open(self.current_file, "w", encoding="utf-8") as f:
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                
+            # print("Saved as LIST format.") # Debug
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TikTokManagerApp(root)
+    root.mainloop()
