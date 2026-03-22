@@ -252,7 +252,7 @@ class ThumbDownloaderApp:
             skipped_count = 0
             done_count = 0
             
-            with ThreadPoolExecutor(max_workers=20) as executor:
+            with ThreadPoolExecutor(max_workers=40) as executor:
                 futures = {executor.submit(process_single_item, key, item, full_thumb_dir, force_recompress): key for key, item in items_list}
                 
                 for future in as_completed(futures):
