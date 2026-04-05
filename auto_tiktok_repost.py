@@ -6,10 +6,16 @@ import signal
 # ================= CẤU HÌNH ĐƯỜNG DẪN =================
 DIR_GIT = r"D:\OneDrive\Documents\GitHub\vhian2468.github.io"
 DIR_V4 = r"D:\OneDrive\Code_choi_AutoIT\!Gemini\tiktok-repost\V4-2026"
+
 FILE_JSON = "data_pe.siro_phan_all.json"
+FILE_JSON_BACKUP1 = "data_pe.siro_phan_all.json.bak1"
+FILE_JSON_BACKUP2 = "data_pe.siro_phan_all.json.bak2"
 
 PATH_GIT_JSON = os.path.join(DIR_GIT, FILE_JSON)
+PATH_GIT_BACKUP1 = os.path.join(DIR_GIT, FILE_JSON_BACKUP1)
+PATH_GIT_BACKUP2 = os.path.join(DIR_GIT, FILE_JSON_BACKUP2)
 PATH_V4_JSON = os.path.join(DIR_V4, FILE_JSON)
+
 # ======================================================
 
 def main():
@@ -17,15 +23,33 @@ def main():
     print("🚀 BẮT ĐẦU QUY TRÌNH TỰ ĐỘNG HÓA TIKTOK REPOST".center(60))
     print("=" * 60)
 
-    # BƯỚC 1: Git -> V4
-    print("\n[Bước 1] Copy file JSON từ Git sang V4...")
-    shutil.copy2(PATH_GIT_JSON, PATH_V4_JSON)
-    print("   ✅ Thành công!")
+    print("\n[Bước 1] Tiến hành Backup và Copy file JSON...")
+    
+    if os.path.exists(PATH_GIT_BACKUP1):
+        shutil.copy2(PATH_GIT_BACKUP1, PATH_GIT_BACKUP2)
+        print("   ✅ Đã backup: bak1 -> bak2")
+
+    if os.path.exists(PATH_GIT_JSON):
+        shutil.copy2(PATH_GIT_JSON, PATH_GIT_BACKUP1)
+        print("   ✅ Đã backup: json hiện tại -> bak1")
+
+    # 3. Copy file json gốc từ Git về V4 (Ghi đè file ở V4)
+    if os.path.exists(PATH_GIT_JSON):
+        shutil.copy2(PATH_GIT_JSON, PATH_V4_JSON)
+        print("   ✅ Đã copy: Git JSON -> V4 JSON thành công!")
+    else:
+        print(f"   ❌ LỖI: Không tìm thấy file JSON gốc tại Git: {PATH_GIT_JSON}")
 
     # BƯỚC 2: Chạy test_api_log
     print("\n[Bước 2] Chuẩn bị chạy 'test_api_log - V2.py'.")
-    choice = input("   👉 Bạn có muốn tool tự động tắt sau 2.5 phút không? (y/n - mặc định là n): ").strip().lower()
-    timeout_sec = 150 if choice == 'y' else None
+    choice = input("   👉 Bạn có muốn tool tự động tắt không? (y = 150s / n = Không / hoặc nhập số giây tùy chỉnh - mặc định là y): ").strip().lower()
+
+    if choice == 'y':
+        timeout_sec = 150
+    elif choice.isdigit():
+        timeout_sec = int(choice)
+    else:
+        timeout_sec = 100  # Áp dụng cho 'n', để trống, hoặc nhập sai định dạng
 
     print("   ⚙️ Đang chạy 'test_api_log - V2.py'...")
     # Dùng CREATE_NEW_PROCESS_GROUP để có thể gửi tín hiệu ngắt (Ctrl+C) trên Windows an toàn

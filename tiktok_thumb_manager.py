@@ -252,6 +252,11 @@ class ThumbDownloaderApp:
             skipped_count = 0
             done_count = 0
             
+            # --- CẤU HÌNH DỪNG SỚM ---
+            stop_on_high_skip = True 
+            skip_threshold = 50 # Sửa lại thành 50 như yêu cầu
+            is_saved = False # Cờ kiểm tra trạng thái lưu
+            
             with ThreadPoolExecutor(max_workers=40) as executor:
                 futures = {executor.submit(process_single_item, key, item, full_thumb_dir, force_recompress): key for key, item in items_list}
                 
@@ -270,12 +275,35 @@ class ThumbDownloaderApp:
                     msg = f"Xong: {done_count}/{total} (Mới/Sửa: {updated_count}, Bỏ qua: {skipped_count})"
                     self.root.after(0, self.update_progress, done_count, total, msg)
 
-            self.status_var.set("Đang lưu file...")
-            input_name = os.path.basename(input_file)
-            name_part, ext = os.path.splitext(input_name)
-            default_out = f"{name_part}_offline{ext}"
-            
-            self.root.after(0, lambda: self.save_file_dialog(data_map, default_out))
+                    # --- KIỂM TRA ĐIỀU KIỆN ĐỂ THOÁT SỚM ---
+                    if stop_on_high_skip and skipped_count > skip_threshold:
+                        self.root.after(0, lambda: self.status_var.set(f"Đã bỏ qua > {skip_threshold} file, đang lưu dữ liệu..."))
+                        
+                        # 1. Hủy tất cả các task đang xếp hàng
+                        for f in futures:
+                            f.cancel()
+                            
+                        # 2. LƯU FILE NGAY LẬP TỨC TRƯỚC KHI BỊ TREO DO ĐỢI THREAD
+                        input_name = os.path.basename(input_file)
+                        name_part, ext = os.path.splitext(input_name)
+                        default_out = f"{name_part}_offline{ext}"
+                        self.root.after(0, lambda m=data_map, d=default_out: self.save_file_dialog(m, d))
+                        
+                        is_saved = True # Đánh dấu là đã gọi hàm lưu thành công
+                        self.log(f"[Cảnh báo] Đã dừng sớm do số file bỏ qua > {skip_threshold}!")
+                        
+                        # Thoát vòng lặp
+                        break 
+                    # ----------------------------------------------------
+
+            # Nếu chạy trọn vẹn không bị ngắt giữa chừng, thì sẽ lưu ở đây
+            if not is_saved:
+                self.status_var.set("Đang lưu file...")
+                input_name = os.path.basename(input_file)
+                name_part, ext = os.path.splitext(input_name)
+                default_out = f"{name_part}_offline{ext}"
+                
+                self.root.after(0, lambda m=data_map, d=default_out: self.save_file_dialog(m, d))
 
         except Exception as e:
             self.log(f"Lỗi: {e}")
