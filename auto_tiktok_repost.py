@@ -5,7 +5,7 @@ import signal
 
 # ================= CẤU HÌNH ĐƯỜNG DẪN =================
 DIR_GIT = r"D:\OneDrive\Documents\GitHub\vhian2468.github.io"
-DIR_V4 = r"D:\OneDrive\Code_choi_AutoIT\!Gemini\tiktok-repost\V4-2026"
+DIR_V4 = r"D:\tiktok\tiktok-repost\V4-2026"
 
 FILE_JSON = "data_pe.siro_phan_all.json"
 FILE_JSON_BACKUP1 = "data_pe.siro_phan_all.json.bak1"
