@@ -135,7 +135,12 @@
             }
         </style>
     </head>
-    <body>
+    <body class="locked">
+    <style>
+        body.locked #loadingMsg { display:none; }
+        .music { display:block; margin-top:8px; font-size:.85em; color:#b7a6ff; text-decoration:none; }
+        .music:hover { text-decoration:underline; }
+    </style>
     
     <div id="sidebar" class="sidebar">
         <button class="sidebar-toggle-arrow" id="sidebarToggle" onclick="toggleSidebar()">▶</button>
@@ -156,7 +161,7 @@
             
             <div class="nav-bar">
                 <div class="nav-group" style="flex-grow: 2;">
-                    <input type="text" id="searchInput" placeholder="🔍 Tìm: caption, date, repost..." style="width: 100%;">
+                    <input type="text" id="searchInput" placeholder="🔍 Username, nickname, ID, caption, hashtag, music..." style="width: 100%;">
                 </div>
                 <div class="nav-group" style="flex-grow: 1;">
                     <select id="sortSelect" style="width: 100%;">
@@ -185,6 +190,7 @@
                     <button onclick="scrollOffset(300)" class="btn-action" title="Xuống">+300</button>
                 </div>
                 <div class="nav-group">
+                    <button id="captionFilter" aria-pressed="false" onclick="toggleCaptionFilter()">💬 Có caption</button>
                     <button onclick="renderAll()" class="btn-danger">All</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
@@ -199,7 +205,6 @@
     </div>
 
     <!-- SỬ DỤNG TIMESTAMP ĐỂ TRÁNH CACHE JS -->
-    <script src="data_pe.siro_phan_all.js?t=1783231227"></script>
     
     <script>
         const grid = document.getElementById('videoGrid');
@@ -220,12 +225,41 @@
         let renderedStart = 0;
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
+        let captionOnly = false;
+        let unlocked = false;
+        let unlocking = false;
 
-        if (window.tiktokData && Array.isArray(window.tiktokData)) {
-            fullData = window.tiktokData;
-            startApp();
-        } else {
-            loadingMsg.innerText = "Không tìm thấy dữ liệu JS!";
+        function unlockApp() {
+            if (unlocking || unlocked || jumpOrderInput.value !== '2211') return;
+            unlocking = true;
+            const script = document.createElement('script');
+            script.src = 'data_pe.siro_phan_all.js?t=1791179261';
+            script.onload = () => {
+                unlocking = false;
+                if (!Array.isArray(window.tiktokData)) { alert('File dữ liệu không hợp lệ'); return; }
+                fullData = window.tiktokData;
+                unlocked = true;
+                jumpOrderInput.value = '';
+                document.body.classList.remove('locked');
+                startApp();
+            };
+            script.onerror = () => { unlocking = false; script.remove(); alert('Không tải được file dữ liệu JS'); };
+            document.head.appendChild(script);
+        }
+        jumpOrderInput.addEventListener('input', () => { if (!unlocked) unlockApp(); });
+        jumpOrderInput.addEventListener('keydown', e => { if (e.key === 'Enter') jumpToOrder(); });
+
+        function toggleCaptionFilter() {
+            if (!unlocked) return;
+            captionOnly = !captionOnly;
+            const button = document.getElementById('captionFilter');
+            button.setAttribute('aria-pressed', String(captionOnly));
+            button.classList.toggle('btn-primary', captionOnly);
+            handleFilter();
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
         function startApp() {
@@ -249,6 +283,46 @@
         }
 
         function createCard(v) {
+            const el = document.createElement('div');
+            el.className = 'card' + (String(v.repost_caption || '').trim() ? ' has-repost-caption' : '');
+            el.id = 'card-' + v.id;
+            const videoUrl = 'https://www.tiktok.com/@' + encodeURIComponent(v.uniqueId || 'unknown') + '/video/' + encodeURIComponent(v.id);
+            const musicId = String(v.music_id || v.music?.id || '');
+            const musicTitle = v.music_title || v.music?.title || '';
+            const musicUrl = /^\d+$/.test(musicId) ? 'https://www.tiktok.com/music/' + encodeURIComponent(musicTitle || 'original-sound') + '-' + musicId : '';
+            const musicHtml = musicTitle ? (musicUrl
+                ? `<a class="music" href="${escapeHtml(musicUrl)}" target="_blank" rel="noopener noreferrer">🎵 ${escapeHtml(musicTitle)}</a>`
+                : `<span class="music" title="Chưa có music ID">🎵 ${escapeHtml(musicTitle)}</span>`) : '';
+            el.innerHTML = `
+                <a href="${escapeHtml(videoUrl)}" target="_blank" rel="noopener noreferrer" class="thumb-link">
+                    <span class="cursor-badge">#${escapeHtml(v.feed_index)}</span>
+                    ${v.repost_order ? `<span class="order-badge">Ord: ${escapeHtml(v.repost_order)}</span>` : ''}
+                    <img class="thumb" loading="lazy" alt="Thumbnail">
+                </a>
+                <div class="info">
+                    ${v.repost_date ? `<div class="date-repost">♻️ ${escapeHtml(v.repost_date)}</div>` : ''}
+                    ${v.repost_caption ? `<div class="caption-repost">💬 ${escapeHtml(v.repost_caption)}</div>` : ''}
+                    <div class="date-normal">📅 Tạo: ${escapeHtml(v.date)}</div>
+                    <span class="nickname">${escapeHtml(v.nickname)}</span>
+                    <span class="uid">@${escapeHtml(v.uniqueId)}</span>
+                    <div class="desc" title="${escapeHtml(v.desc)}">${escapeHtml(v.desc)}</div>
+                    <div class="metrics"><span>❤️ ${escapeHtml(v.digg || 0)}</span><span>💬 ${escapeHtml(v.comment || 0)}</span><span>🔄 ${escapeHtml(v.share || 0)}</span><span>▶ ${escapeHtml(v.play || 0)}</span></div>
+                    ${musicHtml}
+                </div>`;
+            const img = el.querySelector('img');
+            const safeImage = url => /^(https?:\/\/|[^:]+$)/i.test(String(url || '')) ? String(url || '') : '';
+            const online = safeImage(v.cover);
+            let triedOnline = !v.cover_off;
+            img.onload = () => img.classList.add('loaded');
+            img.onerror = () => {
+                if (!triedOnline && online) { triedOnline = true; img.src = online; }
+                else { img.onerror = null; img.classList.add('error'); }
+            };
+            img.src = safeImage(v.cover_off) || online;
+            return el;
+        }
+
+        function legacyCreateCard(v) {
             const el = document.createElement('div');
             let extraClass = '';
             if (v.repost_caption) extraClass = 'has-repost-caption';
@@ -377,6 +451,7 @@
         // --- NEW FUNCTIONS: Order Jump & End Scroll ---
 
         function jumpToOrder() {
+            if (!unlocked) { unlockApp(); return; }
             const targetOrder = parseInt(jumpOrderInput.value);
             if (isNaN(targetOrder)) return;
             
@@ -426,11 +501,11 @@
             const createMap = {};
 
             fullData.forEach(v => {
-                if (v.repost_date) {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(v.repost_date || '')) {
                     if (!repostMap[v.repost_date]) repostMap[v.repost_date] = [];
                     repostMap[v.repost_date].push(v);
                 }
-                if (v.date) {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) {
                     if (!createMap[v.date]) createMap[v.date] = [];
                     createMap[v.date].push(v);
                 }
@@ -474,8 +549,11 @@
             }
 
             if (targetVid) {
-                if (searchInput.value !== '') {
+                if (searchInput.value !== '' || captionOnly) {
                     searchInput.value = '';
+                    captionOnly = false;
+                    document.getElementById('captionFilter').setAttribute('aria-pressed', 'false');
+                    document.getElementById('captionFilter').classList.remove('btn-primary');
                     handleFilter(); 
                 }
                 jumpToId(targetVid.id);
@@ -483,22 +561,27 @@
         };
 
         function handleFilter() {
+            if (!unlocked) return;
             const term = searchInput.value.toLowerCase();
             const sortMode = sortSelect.value;
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => 
+            displayData = fullData.filter(v => (!captionOnly || String(v.repost_caption || '').trim()) && (
                 (v.nickname && v.nickname.toLowerCase().includes(term)) || 
                 (v.date && v.date.includes(term)) ||
                 (v.repost_date && v.repost_date.includes(term)) ||
                 (v.repost_caption && v.repost_caption.toLowerCase().includes(term)) ||
                 (v.desc && v.desc.toLowerCase().includes(term)) ||
-                (v.uniqueId && v.uniqueId.toLowerCase().includes(term))
-            );
+                (v.uniqueId && v.uniqueId.toLowerCase().includes(term)) ||
+                String(v.id || '').includes(term) ||
+                String(v.music_title || '').toLowerCase().includes(term) ||
+                String(v.hashtags || '').toLowerCase().includes(term)
+            ));
+            document.getElementById('totalCount').innerText = displayData.length + '/' + fullData.length;
 
             if (sortMode === 'feed') {
-                displayData.sort((a, b) => (a.feed_index || 9e9) - (b.feed_index || 9e9));
+                displayData.sort((a, b) => (a.feed_index ?? 9e9) - (b.feed_index ?? 9e9));
             } else if (sortMode === 'repost_order') {
                 // Sort by repost_order descending (Newest Repost first)
                 displayData.sort((a, b) => (b.repost_order || 0) - (a.repost_order || 0));

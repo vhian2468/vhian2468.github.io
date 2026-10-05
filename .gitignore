@@ -1,0 +1,34 @@
+# Ignore everything at the repository root unless explicitly allowed.
+/*
+
+# Repository configuration and documentation.
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/README.md
+!/.nojekyll
+
+# Website assets and source databases.
+!/index.html
+!/view_*.html
+!/data_*.js
+!/data_*.json
+!/thumbs_pe.siro_phan/
+
+# Main tools.
+!/auto_tiktok_repost.py
+!/tiktok_html_generator.py
+!/tiktok_thumb_manager.py
+
+# Backups, duplicate copies, logs and runtime state.
+*.bak*
+*.tmp
+*.log
+*.jsonl
+*-DESKTOP-*
+* - Copy*
+*.manager.state.json
+*.deleted_ids.json
+*.pipeline.json
+__pycache__/
+*.pyc

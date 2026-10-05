@@ -5,6 +5,158 @@ import os
 import time
 import webbrowser
 from datetime import datetime
+import tempfile
+import shutil
+import re
+import html as html_lib
+from urllib.parse import quote
+import argparse
+import glob
+import hashlib
+import calendar
+
+
+def enrich_music_from_logs(data, log_paths):
+    mapping = {str(v['id']): v for v in data}
+    added = 0
+    for path in log_paths:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8-sig') as file:
+            for line in file:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                payload = record.get('data', record) if isinstance(record, dict) else record
+                items = payload.get('itemList', payload.get('data', [])) if isinstance(payload, dict) else payload
+                if not isinstance(items, list):
+                    continue
+                for raw in items:
+                    if not isinstance(raw, dict):
+                        continue
+                    current = mapping.get(str(raw.get('id', raw.get('aweme_id', ''))))
+                    music = raw.get('music') or {}
+                    if current is None or not isinstance(music, dict):
+                        continue
+                    music_id = str(music.get('id', music.get('mid', '')))
+                    if music_id.isdigit() and not current.get('music_id'):
+                        current['music_id'] = music_id
+                        current['music_title'] = music.get('title') or current.get('music_title', '')
+                        added += 1
+    return added
+
+
+def default_api_logs():
+    folder = r'D:\tiktok\tiktok-repost\V4-2026'
+    # Oldest first; never changes dates, order, captions or membership of database.
+    return sorted(glob.glob(os.path.join(folder, 'api_log.jsonl.*')), reverse=True) + sorted(glob.glob(os.path.join(folder, 'api_log*.jsonl')))
+
+
+def extract_reposts(text):
+    """Accept offline DB, API response, JSONL capture, HAR and pasted HTTP bodies."""
+    decoder = json.JSONDecoder()
+    roots = []
+    try:
+        roots.append(json.loads(text))
+    except ValueError:
+        # HTTP headers/cURL text may surround a JSON response. Decode complete bodies.
+        position = 0
+        while position < len(text):
+            match = re.compile(r'[\[{]').search(text, position)
+            if not match:
+                break
+            position = match.start()
+            try:
+                value, consumed = decoder.raw_decode(text, position)
+                roots.append(value)
+                position = consumed
+            except ValueError:
+                position += 1
+    result = {}
+
+    def visit(value):
+        if isinstance(value, str):
+            try:
+                visit(json.loads(value))
+            except (ValueError, TypeError):
+                pass
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, dict):
+            identifier = value.get('id', value.get('aweme_id'))
+            if identifier and any(key in value for key in ('desc', 'video', 'uniqueId', 'author', 'repost_caption', 'aweme_desc')):
+                item = normalize_repost(value)
+                result[item['id']] = item
+            else:
+                for child in value.values():
+                    visit(child)
+    for root in roots:
+        visit(root)
+    if not result:
+        raise ValueError('Không tìm thấy video. Request URL/header không chứa dữ liệu video; hãy dán response body JSON hoặc file API/offline.')
+    return list(result.values())
+
+
+def normalize_repost(item):
+    result = dict(item)
+    result['id'] = str(item.get('id', item.get('aweme_id', '')))
+    if not result['id'].isdigit():
+        raise ValueError('ID video phải là chuỗi số TikTok')
+    if 'author' in item or 'video' in item:
+        author = item.get('author') or {}
+        video = item.get('video') or {}
+        stats = item.get('stats') or item.get('statistics') or {}
+        music = item.get('music') or {}
+        result.update({
+            'desc': item.get('desc', item.get('aweme_desc', '')),
+            'uniqueId': author.get('uniqueId', author.get('unique_id', 'unknown')),
+            'nickname': author.get('nickname', ''),
+            'cover': video.get('cover', ''),
+            'duration': video.get('duration', 0),
+            'music_title': music.get('title', ''),
+            'music_id': str(music.get('id', music.get('mid', ''))),
+            'digg': stats.get('diggCount', stats.get('digg_count', 0)),
+            'comment': stats.get('commentCount', stats.get('comment_count', 0)),
+            'share': stats.get('shareCount', stats.get('share_count', 0)),
+            'play': stats.get('playCount', stats.get('play_count', 0)),
+        })
+        if isinstance(result['cover'], dict):
+            urls = result['cover'].get('url_list', [])
+            result['cover'] = urls[0] if urls else ''
+        # Store the original API object for fields not mapped by this version.
+        result['api_raw'] = item
+    timestamp = item.get('createTime', item.get('create_time'))
+    try:
+        result.setdefault('date', datetime.fromtimestamp(int(timestamp or (int(result['id']) >> 32))).strftime('%Y-%m-%d'))
+    except (ValueError, OSError, OverflowError):
+        result.setdefault('date', '')
+    for key in ('desc', 'uniqueId', 'nickname', 'cover', 'music_title', 'music_id', 'repost_date', 'repost_caption'):
+        result.setdefault(key, '')
+    for key in ('digg', 'comment', 'share', 'play', 'duration', 'repost_order'):
+        result.setdefault(key, 0)
+    tags = item.get('textExtra', item.get('text_extra', [])) or []
+    result.setdefault('hashtags', [x.get('hashtagName', x.get('hashtag_name', '')) for x in tags if isinstance(x, dict) and (x.get('hashtagName') or x.get('hashtag_name'))])
+    return result
+
+
+def atomic_write(path, content, backup=False):
+    folder = os.path.dirname(os.path.abspath(path))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=folder, delete=False, suffix='.tmp') as file:
+            temporary = file.name
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        if backup and os.path.isfile(path):
+            shutil.copy2(path, path + '.manager.bak')
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.remove(temporary)
 
 # ================= HTML GENERATOR LOGIC (UPDATED FOR OFFLINE THUMBS) =================
 def generate_static_html(username, data_list):
@@ -145,7 +297,12 @@ def generate_static_html(username, data_list):
             }
         </style>
     </head>
-    <body>
+    <body class="locked">
+    <style>
+        body.locked #loadingMsg { display:none; }
+        .music { display:block; margin-top:8px; font-size:.85em; color:#b7a6ff; text-decoration:none; }
+        .music:hover { text-decoration:underline; }
+    </style>
     
     <div id="sidebar" class="sidebar">
         <button class="sidebar-toggle-arrow" id="sidebarToggle" onclick="toggleSidebar()">▶</button>
@@ -166,7 +323,7 @@ def generate_static_html(username, data_list):
             
             <div class="nav-bar">
                 <div class="nav-group" style="flex-grow: 2;">
-                    <input type="text" id="searchInput" placeholder="🔍 Tìm: caption, date, repost..." style="width: 100%;">
+                    <input type="text" id="searchInput" placeholder="🔍 Username, nickname, ID, caption, hashtag, music..." style="width: 100%;">
                 </div>
                 <div class="nav-group" style="flex-grow: 1;">
                     <select id="sortSelect" style="width: 100%;">
@@ -195,6 +352,7 @@ def generate_static_html(username, data_list):
                     <button onclick="scrollOffset(300)" class="btn-action" title="Xuống">+300</button>
                 </div>
                 <div class="nav-group">
+                    <button id="captionFilter" aria-pressed="false" onclick="toggleCaptionFilter()">💬 Có caption</button>
                     <button onclick="renderAll()" class="btn-danger">All</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
@@ -209,7 +367,6 @@ def generate_static_html(username, data_list):
     </div>
 
     <!-- SỬ DỤNG TIMESTAMP ĐỂ TRÁNH CACHE JS -->
-    <script src="data___USERNAME__.js?t=__TIMESTAMP__"></script>
     
     <script>
         const grid = document.getElementById('videoGrid');
@@ -230,12 +387,41 @@ def generate_static_html(username, data_list):
         let renderedStart = 0;
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
+        let captionOnly = false;
+        let unlocked = false;
+        let unlocking = false;
 
-        if (window.tiktokData && Array.isArray(window.tiktokData)) {
-            fullData = window.tiktokData;
-            startApp();
-        } else {
-            loadingMsg.innerText = "Không tìm thấy dữ liệu JS!";
+        function unlockApp() {
+            if (unlocking || unlocked || jumpOrderInput.value !== '2211') return;
+            unlocking = true;
+            const script = document.createElement('script');
+            script.src = 'data___USERNAME__.js?t=__TIMESTAMP__';
+            script.onload = () => {
+                unlocking = false;
+                if (!Array.isArray(window.tiktokData)) { alert('File dữ liệu không hợp lệ'); return; }
+                fullData = window.tiktokData;
+                unlocked = true;
+                jumpOrderInput.value = '';
+                document.body.classList.remove('locked');
+                startApp();
+            };
+            script.onerror = () => { unlocking = false; script.remove(); alert('Không tải được file dữ liệu JS'); };
+            document.head.appendChild(script);
+        }
+        jumpOrderInput.addEventListener('input', () => { if (!unlocked) unlockApp(); });
+        jumpOrderInput.addEventListener('keydown', e => { if (e.key === 'Enter') jumpToOrder(); });
+
+        function toggleCaptionFilter() {
+            if (!unlocked) return;
+            captionOnly = !captionOnly;
+            const button = document.getElementById('captionFilter');
+            button.setAttribute('aria-pressed', String(captionOnly));
+            button.classList.toggle('btn-primary', captionOnly);
+            handleFilter();
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
         function startApp() {
@@ -259,6 +445,46 @@ def generate_static_html(username, data_list):
         }
 
         function createCard(v) {
+            const el = document.createElement('div');
+            el.className = 'card' + (String(v.repost_caption || '').trim() ? ' has-repost-caption' : '');
+            el.id = 'card-' + v.id;
+            const videoUrl = 'https://www.tiktok.com/@' + encodeURIComponent(v.uniqueId || 'unknown') + '/video/' + encodeURIComponent(v.id);
+            const musicId = String(v.music_id || v.music?.id || '');
+            const musicTitle = v.music_title || v.music?.title || '';
+            const musicUrl = /^\d+$/.test(musicId) ? 'https://www.tiktok.com/music/' + encodeURIComponent(musicTitle || 'original-sound') + '-' + musicId : '';
+            const musicHtml = musicTitle ? (musicUrl
+                ? `<a class="music" href="${escapeHtml(musicUrl)}" target="_blank" rel="noopener noreferrer">🎵 ${escapeHtml(musicTitle)}</a>`
+                : `<span class="music" title="Chưa có music ID">🎵 ${escapeHtml(musicTitle)}</span>`) : '';
+            el.innerHTML = `
+                <a href="${escapeHtml(videoUrl)}" target="_blank" rel="noopener noreferrer" class="thumb-link">
+                    <span class="cursor-badge">#${escapeHtml(v.feed_index)}</span>
+                    ${v.repost_order ? `<span class="order-badge">Ord: ${escapeHtml(v.repost_order)}</span>` : ''}
+                    <img class="thumb" loading="lazy" alt="Thumbnail">
+                </a>
+                <div class="info">
+                    ${v.repost_date ? `<div class="date-repost">♻️ ${escapeHtml(v.repost_date)}</div>` : ''}
+                    ${v.repost_caption ? `<div class="caption-repost">💬 ${escapeHtml(v.repost_caption)}</div>` : ''}
+                    <div class="date-normal">📅 Tạo: ${escapeHtml(v.date)}</div>
+                    <span class="nickname">${escapeHtml(v.nickname)}</span>
+                    <span class="uid">@${escapeHtml(v.uniqueId)}</span>
+                    <div class="desc" title="${escapeHtml(v.desc)}">${escapeHtml(v.desc)}</div>
+                    <div class="metrics"><span>❤️ ${escapeHtml(v.digg || 0)}</span><span>💬 ${escapeHtml(v.comment || 0)}</span><span>🔄 ${escapeHtml(v.share || 0)}</span><span>▶ ${escapeHtml(v.play || 0)}</span></div>
+                    ${musicHtml}
+                </div>`;
+            const img = el.querySelector('img');
+            const safeImage = url => /^(https?:\/\/|[^:]+$)/i.test(String(url || '')) ? String(url || '') : '';
+            const online = safeImage(v.cover);
+            let triedOnline = !v.cover_off;
+            img.onload = () => img.classList.add('loaded');
+            img.onerror = () => {
+                if (!triedOnline && online) { triedOnline = true; img.src = online; }
+                else { img.onerror = null; img.classList.add('error'); }
+            };
+            img.src = safeImage(v.cover_off) || online;
+            return el;
+        }
+
+        function legacyCreateCard(v) {
             const el = document.createElement('div');
             let extraClass = '';
             if (v.repost_caption) extraClass = 'has-repost-caption';
@@ -387,6 +613,7 @@ def generate_static_html(username, data_list):
         // --- NEW FUNCTIONS: Order Jump & End Scroll ---
 
         function jumpToOrder() {
+            if (!unlocked) { unlockApp(); return; }
             const targetOrder = parseInt(jumpOrderInput.value);
             if (isNaN(targetOrder)) return;
             
@@ -436,11 +663,11 @@ def generate_static_html(username, data_list):
             const createMap = {};
 
             fullData.forEach(v => {
-                if (v.repost_date) {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(v.repost_date || '')) {
                     if (!repostMap[v.repost_date]) repostMap[v.repost_date] = [];
                     repostMap[v.repost_date].push(v);
                 }
-                if (v.date) {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) {
                     if (!createMap[v.date]) createMap[v.date] = [];
                     createMap[v.date].push(v);
                 }
@@ -484,8 +711,11 @@ def generate_static_html(username, data_list):
             }
 
             if (targetVid) {
-                if (searchInput.value !== '') {
+                if (searchInput.value !== '' || captionOnly) {
                     searchInput.value = '';
+                    captionOnly = false;
+                    document.getElementById('captionFilter').setAttribute('aria-pressed', 'false');
+                    document.getElementById('captionFilter').classList.remove('btn-primary');
                     handleFilter(); 
                 }
                 jumpToId(targetVid.id);
@@ -493,22 +723,27 @@ def generate_static_html(username, data_list):
         };
 
         function handleFilter() {
+            if (!unlocked) return;
             const term = searchInput.value.toLowerCase();
             const sortMode = sortSelect.value;
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => 
+            displayData = fullData.filter(v => (!captionOnly || String(v.repost_caption || '').trim()) && (
                 (v.nickname && v.nickname.toLowerCase().includes(term)) || 
                 (v.date && v.date.includes(term)) ||
                 (v.repost_date && v.repost_date.includes(term)) ||
                 (v.repost_caption && v.repost_caption.toLowerCase().includes(term)) ||
                 (v.desc && v.desc.toLowerCase().includes(term)) ||
-                (v.uniqueId && v.uniqueId.toLowerCase().includes(term))
-            );
+                (v.uniqueId && v.uniqueId.toLowerCase().includes(term)) ||
+                String(v.id || '').includes(term) ||
+                String(v.music_title || '').toLowerCase().includes(term) ||
+                String(v.hashtags || '').toLowerCase().includes(term)
+            ));
+            document.getElementById('totalCount').innerText = displayData.length + '/' + fullData.length;
 
             if (sortMode === 'feed') {
-                displayData.sort((a, b) => (a.feed_index || 9e9) - (b.feed_index || 9e9));
+                displayData.sort((a, b) => (a.feed_index ?? 9e9) - (b.feed_index ?? 9e9));
             } else if (sortMode === 'repost_order') {
                 // Sort by repost_order descending (Newest Repost first)
                 displayData.sort((a, b) => (b.repost_order || 0) - (a.repost_order || 0));
@@ -532,7 +767,7 @@ def generate_static_html(username, data_list):
     </body>
     </html>
     """
-    html_content = html_template.replace("__USERNAME__", username)
+    html_content = html_template.replace("__USERNAME__", html_lib.escape(username, quote=True))
     html_content = html_content.replace("__TIMESTAMP__", str(int(time.time())))
     return html_content
 
@@ -541,7 +776,7 @@ class TikTokManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("TikTok HTML Generator & Data Manager")
-        self.root.geometry("1000x600")
+        self.root.geometry("1400x780")
         
         self.data = {}
         self.data_list = []
@@ -555,6 +790,8 @@ class TikTokManagerApp:
         self.top_frame.pack(fill="x")
         
         tk.Button(self.top_frame, text="📂 Chọn File JSON", command=self.load_file, bg="white").pack(side="left", padx=5)
+        tk.Button(self.top_frame, text="➕ Thêm / nhập API", command=self.import_reposts).pack(side="left", padx=5)
+        tk.Button(self.top_frame, text="🗑 Xóa đã chọn", command=self.delete_reposts).pack(side="left", padx=5)
         self.lbl_file = tk.Label(self.top_frame, text="Chưa chọn file", bg="#eee", fg="#555")
         self.lbl_file.pack(side="left", padx=5)
         
@@ -578,29 +815,43 @@ class TikTokManagerApp:
         self.search_var.trace("w", self.on_search)
         
         # Dùng Label thay cho placeholder
-        tk.Label(self.left_frame, text="🔍 Tìm kiếm (ID, Caption, Date):").pack(anchor="w", padx=5)
+        tk.Label(self.left_frame, text="🔍 Username / nickname, ID, mô tả, caption, hashtag, ngày, music:").pack(anchor="w", padx=5)
         tk.Entry(self.left_frame, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
         
         # Treeview (List)
-        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order"), show="headings")
+        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption"), show="headings", selectmode="extended")
         self.tree.heading("feed_index", text="#")
         self.tree.heading("date", text="Ngày tạo")
-        self.tree.heading("nickname", text="Nickname")
+        self.tree.heading("nickname", text="Username / Nickname")
+        self.tree.heading("caption", text="Repost Caption")
         self.tree.heading("repost_date", text="Ngày Repost")
         self.tree.heading("order", text="Ord")
         
         self.tree.column("feed_index", width=50)
         self.tree.column("date", width=90)
-        self.tree.column("nickname", width=120)
+        self.tree.column("nickname", width=220)
+        self.tree.column("caption", width=240)
         self.tree.column("repost_date", width=90)
         self.tree.column("order", width=50)
         
         self.tree.pack(fill="both", expand=True)
+        horizontal = ttk.Scrollbar(self.left_frame, orient='horizontal', command=self.tree.xview)
+        horizontal.pack(fill='x')
+        self.tree.configure(xscrollcommand=horizontal.set)
         self.tree.bind("<<TreeviewSelect>>", self.on_select_item)
         
         # --- RIGHT: EDITOR ---
-        self.right_frame = tk.Frame(self.paned, bg="#f9f9f9", bd=1, relief="sunken")
-        self.paned.add(self.right_frame)
+        right_shell = tk.Frame(self.paned)
+        self.paned.add(right_shell, width=430)
+        editor_canvas = tk.Canvas(right_shell, bg='#f9f9f9', highlightthickness=0)
+        editor_scroll = ttk.Scrollbar(right_shell, orient='vertical', command=editor_canvas.yview)
+        editor_scroll.pack(side='right', fill='y')
+        editor_canvas.pack(side='left', fill='both', expand=True)
+        editor_canvas.configure(yscrollcommand=editor_scroll.set)
+        self.right_frame = tk.Frame(editor_canvas, bg='#f9f9f9')
+        editor_window = editor_canvas.create_window((0, 0), window=self.right_frame, anchor='nw')
+        self.right_frame.bind('<Configure>', lambda event: editor_canvas.configure(scrollregion=editor_canvas.bbox('all')))
+        editor_canvas.bind('<Configure>', lambda event: editor_canvas.itemconfigure(editor_window, width=event.width))
         
         tk.Label(self.right_frame, text="✏️ CHỈNH SỬA", font=("Arial", 12, "bold"), bg="#f9f9f9").pack(pady=10)
         
@@ -616,10 +867,18 @@ class TikTokManagerApp:
         self.entry_repost_date.pack(fill="x", pady=2)
         # SỬA LỖI Ở ĐÂY: thay text_color thành fg
         tk.Button(self.form_frame, text="Hôm nay", command=self.set_today, fg="blue", height=1).pack(anchor="e")
+        tk.Button(self.form_frame, text='📅 Chọn ngày từ lịch', command=self.show_date_calendar).pack(anchor='e', pady=3)
         
         tk.Label(self.form_frame, text="Repost Caption:", bg="#f9f9f9").pack(anchor="w", pady=(10, 0))
         self.entry_repost_cap = tk.Entry(self.form_frame)
         self.entry_repost_cap.pack(fill="x", pady=2)
+
+        self.extra_entries = {}
+        for key, label in (('uniqueId', 'Username'), ('nickname', 'Nickname'), ('desc', 'Mô tả / hashtag'), ('music_title', 'Tên nhạc'), ('music_id', 'Music ID (để mở link nhạc)')):
+            tk.Label(self.form_frame, text=label + ':', bg='#f9f9f9').pack(anchor='w')
+            entry = tk.Entry(self.form_frame)
+            entry.pack(fill='x', pady=2)
+            self.extra_entries[key] = entry
         
         tk.Label(self.form_frame, text="Repost Order (Tự động):", bg="#f9f9f9").pack(anchor="w", pady=(10, 0))
         self.entry_repost_order = tk.Entry(self.form_frame, state="readonly")
@@ -632,9 +891,126 @@ class TikTokManagerApp:
 
         self.selected_vid = None
 
+    def import_reposts(self):
+        if not self.current_file:
+            messagebox.showinfo('Chọn database', 'Hãy chọn file JSON database trước khi thêm repost.')
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title('Thêm repost: API / JSON offline / thủ công')
+        dialog.geometry('850x650')
+        tk.Label(dialog, text='Dán response JSON, request có body JSON, JSONL/HAR hoặc chọn file. Request URL đơn thuần không chứa video.').pack(anchor='w', padx=10, pady=8)
+        text = tk.Text(dialog, wrap='word')
+        text.pack(fill='both', expand=True, padx=10)
+        options = tk.Frame(dialog)
+        options.pack(fill='x', padx=10, pady=8)
+        tk.Label(options, text='Chèn mới tại Feed index:').pack(side='left')
+        position_entry = tk.Entry(options, width=8)
+        position_entry.insert(0, '0')
+        position_entry.pack(side='left')
+        update_existing = tk.BooleanVar(value=False)
+        tk.Checkbutton(options, text='Cập nhật thông tin API cho ID đã tồn tại', variable=update_existing).pack(side='left', padx=10)
+
+        def choose_file():
+            path = filedialog.askopenfilename(filetypes=[('API / JSON / HAR', '*.json *.jsonl *.har *.txt'), ('Tất cả', '*.*')])
+            if path:
+                try:
+                    with open(path, encoding='utf-8-sig') as file:
+                        content = file.read()
+                    text.delete('1.0', tk.END)
+                    text.insert('1.0', content)
+                except Exception as error:
+                    messagebox.showerror('Không đọc được file', str(error))
+
+        def manual_template():
+            text.delete('1.0', tk.END)
+            text.insert('1.0', json.dumps({'id': '', 'uniqueId': '', 'nickname': '', 'desc': '', 'cover': '', 'repost_date': '', 'repost_caption': '', 'music_title': '', 'music_id': ''}, ensure_ascii=False, indent=2))
+
+        def apply_import():
+            try:
+                incoming = extract_reposts(text.get('1.0', tk.END))
+                position = int(position_entry.get())
+                if not 0 <= position <= len(self.data_list):
+                    raise ValueError('Feed index chèn phải nằm trong database hiện tại')
+                old_list = self.data_list
+                new_list = [dict(v) for v in old_list]
+                mapping = {v['id']: v for v in new_list}
+                added, updated = [], 0
+                protected = ('repost_date', 'repost_caption', 'repost_order', 'cover_off', 'feed_index')
+                for item in incoming:
+                    if item['id'] not in mapping:
+                        added.append(item)
+                        mapping[item['id']] = item
+                    elif update_existing.get():
+                        current = mapping[item['id']]
+                        preserved = {key: current[key] for key in protected if key in current}
+                        current.update(item)
+                        current.update(preserved)
+                        updated += 1
+                new_list[position:position] = added
+                for index, item in enumerate(new_list):
+                    item['feed_index'] = index
+                self.data_list = new_list
+                self.data = {v['id']: v for v in new_list}
+                if not self.save_json_file():
+                    self.data_list = old_list
+                    self.data = {v['id']: v for v in old_list}
+                    return
+                excluded_path = self.current_file + '.deleted_ids.json'
+                if os.path.isfile(excluded_path):
+                    with open(excluded_path, encoding='utf-8') as file:
+                        excluded = set(json.load(file))
+                    excluded.difference_update(v['id'] for v in incoming)
+                    atomic_write(excluded_path, json.dumps(sorted(excluded)))
+                self.refresh_tree()
+                self.lbl_file.config(text=f'User: {self.username} | {len(new_list)} videos')
+                messagebox.showinfo('Đã nhập', f'Thêm {len(added)}; cập nhật {updated}; bỏ qua {len(incoming)-len(added)-updated} ID cũ.\nRepost Order cũ được giữ; dùng Tạo Repost Order nếu cần tính lại.')
+                dialog.destroy()
+            except Exception as error:
+                messagebox.showerror('Không nhập được', str(error))
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill='x', padx=10, pady=10)
+        tk.Button(buttons, text='📂 Chọn file', command=choose_file).pack(side='left')
+        tk.Button(buttons, text='Mẫu nhập thủ công', command=manual_template).pack(side='left', padx=8)
+        tk.Button(buttons, text='Thêm vào database', command=apply_import, bg='#ddffdd').pack(side='right')
+
+    def delete_reposts(self):
+        selections = self.tree.selection()
+        if not selections:
+            return
+        ids = {self.tree.item(row, 'tags')[0] for row in selections}
+        if not messagebox.askyesno('Xóa khỏi database', f'Xóa {len(ids)} repost khỏi database local?\nKhông tác động tài khoản TikTok. Bản trước khi xóa được lưu ở .manager.bak.'):
+            return
+        old_list = self.data_list
+        excluded_path = self.current_file + '.deleted_ids.json'
+        try:
+            excluded = set()
+            if os.path.isfile(excluded_path):
+                with open(excluded_path, encoding='utf-8') as file:
+                    excluded = set(json.load(file))
+            atomic_write(excluded_path, json.dumps(sorted(excluded | ids)), backup=True)
+        except Exception as error:
+            messagebox.showerror('Không lưu được danh sách xóa', str(error))
+            return
+        self.data_list = [dict(v) for v in old_list if v['id'] not in ids]
+        for index, item in enumerate(self.data_list):
+            item['feed_index'] = index
+        self.data = {v['id']: v for v in self.data_list}
+        if not self.save_json_file():
+            self.data_list = old_list
+            self.data = {v['id']: v for v in old_list}
+            atomic_write(excluded_path, json.dumps(sorted(excluded)))
+            return
+        self.selected_vid = None
+        self.refresh_tree()
+        self.lbl_file.config(text=f'User: {self.username} | {len(self.data_list)} videos')
+
     def load_file(self):
         filename = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
         if not filename: return
+        self.load_path(filename)
+
+    def load_path(self, filename, notify=True):
         
         try:
             with open(filename, "r", encoding="utf-8") as f:
@@ -651,7 +1027,10 @@ class TikTokManagerApp:
                 self.data_list = []
 
             # Tạo Map Dict nội bộ để tìm kiếm nhanh theo ID
-            self.data = {v['id']: v for v in self.data_list if 'id' in v}
+            self.data_list = [normalize_repost(v) for v in self.data_list]
+            self.data = {v['id']: v for v in self.data_list}
+            if len(self.data) != len(self.data_list):
+                raise ValueError('Database có ID trùng; hãy sửa bản sao trước khi mở')
             
             # Extract username
             base = os.path.basename(filename)
@@ -665,9 +1044,11 @@ class TikTokManagerApp:
             
             # Sort mặc định
             self.data_list.sort(key=lambda x: x.get('feed_index', 999999))
+            self.selected_vid = None
             
             self.refresh_tree()
-            messagebox.showinfo("OK", "Đã tải dữ liệu thành công! (Tự động convert về List)")
+            if notify:
+                messagebox.showinfo("OK", "Đã tải dữ liệu thành công! (Tự động convert về List)")
             
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không đọc được file: {e}")
@@ -687,6 +1068,8 @@ class TikTokManagerApp:
             if term in str(v.get('desc', '')).lower(): match = True
             if term in str(v.get('nickname', '')).lower(): match = True
             if term in str(v.get('repost_date', '')).lower(): match = True
+            for key in ('uniqueId', 'date', 'repost_caption', 'hashtags', 'music_title', 'music_id', 'repost_order', 'feed_index'):
+                if term in str(v.get(key, '')).lower(): match = True
             
             if not term or match:
                 self.filtered_list.append(v)
@@ -696,9 +1079,10 @@ class TikTokManagerApp:
             self.tree.insert("", "end", values=(
                 v.get('feed_index', ''),
                 v.get('date', ''),
-                v.get('nickname', ''),
+                '@' + v.get('uniqueId', '') + ' / ' + v.get('nickname', ''),
                 v.get('repost_date', ''),
-                v.get('repost_order', '')
+                v.get('repost_order', ''),
+                v.get('repost_caption', '')
             ), tags=(v['id'],))
 
     def on_search(self, *args):
@@ -723,6 +1107,9 @@ class TikTokManagerApp:
         
         self.entry_repost_cap.delete(0, tk.END)
         self.entry_repost_cap.insert(0, v.get('repost_caption', ''))
+        for key, entry in self.extra_entries.items():
+            entry.delete(0, tk.END)
+            entry.insert(0, v.get(key, ''))
         
         self.entry_repost_order.config(state="normal")
         self.entry_repost_order.delete(0, tk.END)
@@ -734,12 +1121,71 @@ class TikTokManagerApp:
         self.entry_repost_date.delete(0, tk.END)
         self.entry_repost_date.insert(0, today)
 
+    def show_date_calendar(self):
+        try:
+            chosen = datetime.strptime(self.entry_repost_date.get().strip(), '%Y-%m-%d')
+        except ValueError:
+            chosen = datetime.now()
+        popup = tk.Toplevel(self.root)
+        popup.title('Chọn ngày Repost')
+        popup.transient(self.root)
+        popup.resizable(False, False)
+        year, month = tk.IntVar(value=chosen.year), tk.IntVar(value=chosen.month)
+        navigation = tk.Frame(popup)
+        navigation.pack(padx=10, pady=10)
+        days = tk.Frame(popup)
+        days.pack(padx=10, pady=(0, 10))
+
+        def select_day(day):
+            value = f'{year.get():04d}-{month.get():02d}-{day:02d}'
+            self.entry_repost_date.delete(0, tk.END)
+            self.entry_repost_date.insert(0, value)
+            popup.destroy()
+
+        def draw():
+            try:
+                y, m = year.get(), month.get()
+                if not 1900 <= y <= 2100 or not 1 <= m <= 12:
+                    return
+            except (ValueError, tk.TclError):
+                return
+            for widget in days.winfo_children():
+                widget.destroy()
+            for column, label in enumerate(('T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN')):
+                tk.Label(days, text=label, width=4).grid(row=0, column=column)
+            for row, week in enumerate(calendar.monthcalendar(y, m), start=1):
+                for column, day in enumerate(week):
+                    if day:
+                        color = '#cce8ff' if (y, m, day) == (chosen.year, chosen.month, chosen.day) else '#f0f0f0'
+                        tk.Button(days, text=str(day), width=4, bg=color, command=lambda d=day: select_day(d)).grid(row=row, column=column, padx=1, pady=1)
+
+        def move(delta):
+            try:
+                total = year.get() * 12 + month.get() - 1 + delta
+                y, m = divmod(total, 12)
+                if 1900 <= y <= 2100:
+                    year.set(y)
+                    month.set(m + 1)
+                    draw()
+            except (ValueError, tk.TclError):
+                pass
+
+        tk.Button(navigation, text='◀', command=lambda: move(-1)).pack(side='left')
+        tk.Spinbox(navigation, from_=1, to=12, width=3, textvariable=month, command=draw).pack(side='left', padx=6)
+        tk.Spinbox(navigation, from_=1900, to=2100, width=5, textvariable=year, command=draw).pack(side='left')
+        tk.Button(navigation, text='Xem', command=draw).pack(side='left', padx=6)
+        tk.Button(navigation, text='▶', command=lambda: move(1)).pack(side='left')
+        draw()
+        popup.grab_set()
+
     def save_current_item(self):
         if not self.selected_vid or self.selected_vid not in self.data: return
         
         v = self.data[self.selected_vid]
         v['repost_date'] = self.entry_repost_date.get().strip()
         v['repost_caption'] = self.entry_repost_cap.get().strip()
+        for key, entry in self.extra_entries.items():
+            v[key] = entry.get().strip()
         
         # Update UI List
         self.refresh_tree()
@@ -828,36 +1274,75 @@ class TikTokManagerApp:
         if not self.username: return
         html = generate_static_html(self.username, self.data_list)
         
-        html_file = f"view_{self.username}.html"
-        js_file = f"data_{self.username}.js"
+        output_dir = os.path.dirname(os.path.abspath(self.current_file))
+        html_file = os.path.join(output_dir, f"view_{self.username}.html")
+        js_file = os.path.join(output_dir, f"data_{self.username}.js")
         
         # Save JS
-        js_content = f"window.tiktokData = {json.dumps(self.data_list, ensure_ascii=False)};"
-        with open(js_file, "w", encoding="utf-8") as f:
-            f.write(js_content)
+        enrich_music_from_logs(self.data_list, default_api_logs())
+        export_data = [{key: value for key, value in v.items() if key != 'api_raw'} for v in self.data_list]
+        js_content = f"window.tiktokData = {json.dumps(export_data, ensure_ascii=False)};"
+        atomic_write(js_file, js_content)
             
         # Save HTML
-        with open(html_file, "w", encoding="utf-8") as f:
-            f.write(html)
+        atomic_write(html_file, html)
             
         messagebox.showinfo("Xuất HTML", f"Đã tạo xong:\n- {html_file}\n- {js_file}")
         webbrowser.open(html_file)
 
     def save_json_file(self):
-        if not self.current_file: return
+        if not self.current_file: return False
         try:
             # --- FIX: LUÔN LƯU DẠNG LIST (JSON MỚI) ---
             # Chuyển từ Dict map {ID: Obj} sang List [Obj, Obj] trước khi lưu
-            save_data = list(self.data.values())
-            
-            with open(self.current_file, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
+            save_data = self.data_list
+            ids = [v['id'] for v in save_data]
+            if len(ids) != len(set(ids)):
+                raise ValueError('Database có ID trùng; không ghi file')
+            atomic_write(self.current_file, json.dumps(save_data, ensure_ascii=False, indent=2), backup=True)
+            with open(self.current_file, 'rb') as file:
+                digest = hashlib.sha256(file.read()).hexdigest()
+            atomic_write(self.current_file + '.manager.state.json', json.dumps({'sha256': digest, 'edited_at': datetime.now().isoformat()}))
+            return True
                 
             # print("Saved as LIST format.") # Debug
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
+            return False
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = TikTokManagerApp(root)
-    root.mainloop()
+def export_automatically(input_path, output_dir=None, api_logs=None):
+    with open(input_path, encoding='utf-8-sig') as file:
+        raw = json.load(file)
+    data = [normalize_repost(v) for v in (raw.values() if isinstance(raw, dict) else raw)]
+    ids = [v['id'] for v in data]
+    if len(set(ids)) != len(ids):
+        raise ValueError('Database có ID trùng; không xuất HTML')
+    base = os.path.basename(input_path)
+    username = base[5:-5] if base.startswith('data_') and base.endswith('.json') else os.path.splitext(base)[0]
+    output_dir = output_dir or os.path.dirname(os.path.abspath(input_path))
+    os.makedirs(output_dir, exist_ok=True)
+    added = enrich_music_from_logs(data, default_api_logs() if api_logs is None else api_logs)
+    export_data = [{key: value for key, value in v.items() if key != 'api_raw'} for v in data]
+    js_path = os.path.join(output_dir, f'data_{username}.js')
+    html_path = os.path.join(output_dir, f'view_{username}.html')
+    atomic_write(js_path, 'window.tiktokData = ' + json.dumps(export_data, ensure_ascii=False) + ';')
+    atomic_write(html_path, generate_static_html(username, data))
+    print(f'EXPORTED: {len(data)} videos; bổ sung {added} music IDs từ API log; có link nhạc: {sum(bool(v.get("music_id")) for v in data)}')
+    print(f'HTML: {html_path}')
+    return html_path, js_path
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='TikTok manager và HTML exporter')
+    parser.add_argument('--auto', action='store_true', help='Xuất xong tự thoát, không mở GUI/browser')
+    parser.add_argument('--input', default='data_pe.siro_phan_all.json')
+    parser.add_argument('--output-dir')
+    args = parser.parse_args()
+    if args.auto:
+        export_automatically(args.input, args.output_dir)
+    else:
+        root = tk.Tk()
+        app = TikTokManagerApp(root)
+        if os.path.isfile(args.input):
+            app.load_path(args.input, notify=False)
+        root.mainloop()
