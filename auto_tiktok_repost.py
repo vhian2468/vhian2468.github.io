@@ -226,20 +226,27 @@ def has_valid_save_receipt(run_id, minimum_count):
         return False
 
 
-def stop_child_safely(process):
+def stop_child_safely(process, stop_request_path=None):
     if process.poll() is not None:
         print(f"   ℹ️ Collector đã dừng trước tín hiệu, exit code={process.returncode}")
         return
-    if os.name == "nt":
+    if stop_request_path:
+        # Per-run file avoids interrupting Playwright's greenlet dispatcher.
+        with open(stop_request_path, "w", encoding="utf-8") as file:
+            file.write(datetime.now().isoformat())
+            file.flush()
+            os.fsync(file.fileno())
+        print(f"   🛑 Đã gửi yêu cầu lưu/dừng tới collector PID {process.pid}")
+    elif os.name == "nt":
         print(f"   🛑 Gửi CTRL_BREAK_EVENT tới collector PID {process.pid}")
         process.send_signal(signal.CTRL_BREAK_EVENT)
     else:
         print(f"   🛑 Gửi SIGINT tới collector PID {process.pid}")
         process.send_signal(signal.SIGINT)
     try:
-        process.wait(timeout=30)
+        process.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        print("   ⚠️ Collector chưa thoát sau 30s; kết thúc tiến trình rồi kiểm tra save receipt.")
+        print("   ⚠️ Collector chưa thoát sau 60s; xem stack trong run log. Kết thúc tiến trình rồi kiểm tra save receipt.")
         process.terminate()
         try:
             process.wait(timeout=10)
@@ -319,6 +326,8 @@ def main():
     collector_run_id = f"auto-{os.getpid()}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
     child_env = os.environ.copy()
     child_env["TIKTOK_RUN_ID"] = collector_run_id
+    stop_request_path = os.path.join(RUN_LOG_DIR, collector_run_id + ".stop")
+    child_env["TIKTOK_STOP_FILE"] = stop_request_path
     p1 = subprocess.Popen(
         [sys.executable, "-u", COLLECTOR_SCRIPT],
         cwd=DIR_V4,
@@ -351,14 +360,16 @@ def main():
             
     except subprocess.TimeoutExpired:
         print(f"\n   ⏰ Đã hết {timeout_sec} giây! Đang yêu cầu tool lưu và dừng...")
-        stop_child_safely(p1)
+        stop_child_safely(p1, stop_request_path)
         print("   ✅ Đã tắt tool thành công.")
         
     except KeyboardInterrupt:
         print("\n   🛑 Bạn vừa ấn Ctrl+C thủ công. Đang dừng tool an toàn...")
-        stop_child_safely(p1)
+        stop_child_safely(p1, stop_request_path)
         print("   ✅ Đã tắt tool thành công.")
 
+    if p1.poll() is not None and os.path.isfile(stop_request_path):
+        os.remove(stop_request_path)
     output_thread.join(timeout=15)
     if output_thread.is_alive():
         print("   ⚠️ Luồng ghi log collector chưa đóng sau 15 giây.")
