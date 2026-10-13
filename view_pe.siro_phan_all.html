@@ -19,7 +19,8 @@
                 --neon-green: #39ff14;
                 --neon-yellow: #fff01f;
             }
-            body { background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; }
+            body { background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+            * { box-sizing: border-box; }
             
             /* === SIDEBAR === */
             .sidebar { 
@@ -65,21 +66,25 @@
             .sb-section.repost-sec { color: var(--neon-green); border-left: 4px solid var(--neon-green); }
             .sb-section.create-sec { color: var(--primary); border-left: 4px solid var(--primary); margin-top: 10px;}
 
-            .date-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.95em; display: flex; justify-content: space-between; color: #ccc; }
+            .date-item { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.9em; display: flex; flex-wrap: wrap; gap: 5px; justify-content: space-between; color: #ccc; }
             .date-item:hover, .date-item:active { background: #333; color: #fff; }
             .date-count { background: #444; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }
 
             /* MAIN CONTENT */
             .main-container { 
-                flex-grow: 1; display: flex; flex-direction: column; height: 100%; margin-left: 0; width: 100%; transition: margin-left 0.3s ease; 
+                flex-grow: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin-left: 0; width: 100%; transition: margin-left 0.3s ease;
             }
             
             .controls { background: #181818; padding: 10px; border-bottom: 1px solid #333; z-index: 100; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+            .controls { flex-shrink: 0; position: relative; max-height: 45dvh; overflow-y: auto; }
             .top-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
             .stats { font-size: 0.9em; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             
             .nav-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
             .nav-group { display: flex; gap: 5px; background: #222; padding: 4px; border-radius: 6px; align-items: center; }
+            .nav-bar { flex-shrink: 0; overscroll-behavior-x: contain; }
+            .nav-group { flex-shrink: 0; }
+            #searchInput { min-width: 0; }
             
             input, select, button { padding: 8px; border-radius: 6px; border: 1px solid #444; background: #2f2f2f; color: white; font-size: 14px; outline: none; }
             input:focus, select:focus { border-color: var(--primary); }
@@ -90,7 +95,7 @@
             .btn-action { min-width: 60px; }
             .btn-danger { background: #822; border: none; }
 
-            .scroll-area { flex-grow: 1; overflow-y: auto; padding: 10px; -webkit-overflow-scrolling: touch; background: #000; }
+            .scroll-area { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; background: #000; }
             .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
             
             /* CARD DESIGN UPDATED */
@@ -128,7 +133,8 @@
             @media (max-width: 768px) {
                 .grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
                 .controls { gap: 8px; }
-                .nav-bar { flex-wrap: wrap; }
+                .nav-bar { flex-wrap: nowrap; overflow-x: auto; }
+                .nav-search .nav-group { flex-shrink: 1; min-width: 0; }
                 .nickname { font-size: 0.9rem; }
                 .metrics { font-size: 0.75em; gap: 8px; }
                 .sidebar-toggle-arrow { height: 50px; width: 36px; font-size: 20px; top: 60px; }
@@ -143,9 +149,9 @@
     </style>
     
     <div id="sidebar" class="sidebar">
-        <button class="sidebar-toggle-arrow" id="sidebarToggle" onclick="toggleSidebar()">▶</button>
         <div class="sidebar-header">
             <span class="sidebar-title">🗂 DATA MANAGER</span>
+            <button onclick="toggleSidebar()" aria-label="Đóng danh sách ngày">✕</button>
         </div>
         <div id="dateList" class="date-list"></div>
     </div>
@@ -153,13 +159,14 @@
     <div id="mainContainer" class="main-container">
         <div class="controls">
             <div class="top-bar">
+                <button id="sidebarToggle" onclick="toggleSidebar()" aria-label="Mở danh sách ngày" aria-expanded="false">☰</button>
                 <div class="stats">
                     <span style="color:#fe2c55; font-weight:bold;">pe.siro_phan_all</span> 
                     (<span id="totalCount">0</span> items)
                 </div>
             </div>
             
-            <div class="nav-bar">
+            <div class="nav-bar nav-search">
                 <div class="nav-group" style="flex-grow: 2;">
                     <input type="text" id="searchInput" placeholder="🔍 Username, nickname, ID, caption, hashtag, music..." style="width: 100%;">
                 </div>
@@ -191,6 +198,9 @@
                 </div>
                 <div class="nav-group">
                     <button id="captionFilter" aria-pressed="false" onclick="toggleCaptionFilter()">💬 Có caption</button>
+                    <button id="postFilter" aria-pressed="false" onclick="toggleTypeFilter('post')">Post</button>
+                    <button id="storyFilter" aria-pressed="false" onclick="toggleTypeFilter('story')">Story</button>
+                    <button id="repostFilter" aria-pressed="false" onclick="toggleTypeFilter('repost')">Repost</button>
                     <button onclick="renderAll()" class="btn-danger">All</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
@@ -226,6 +236,7 @@
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
         let captionOnly = false;
+        const selectedTypes = new Set();
         let unlocked = false;
         let unlocking = false;
 
@@ -233,7 +244,7 @@
             if (unlocking || unlocked || jumpOrderInput.value !== '2211') return;
             unlocking = true;
             const script = document.createElement('script');
-            script.src = 'data_pe.siro_phan_all.js?t=1791765571';
+            script.src = 'data_pe.siro_phan_all.js?t=1791880115';
             script.onload = () => {
                 unlocking = false;
                 if (!Array.isArray(window.tiktokData)) { alert('File dữ liệu không hợp lệ'); return; }
@@ -258,6 +269,21 @@
             handleFilter();
         }
 
+        function contentType(v) { return ['post', 'story', 'repost'].includes(v.source_type) ? v.source_type : 'unknown'; }
+        function typeSummary(records) {
+            const counts = {post:0, story:0, repost:0, unknown:0};
+            records.forEach(v => counts[contentType(v)]++);
+            return `P ${counts.post} · S ${counts.story} · R ${counts.repost}` + (counts.unknown ? ` · ? ${counts.unknown}` : '');
+        }
+        function toggleTypeFilter(kind) {
+            if (!unlocked) return;
+            if (selectedTypes.has(kind)) selectedTypes.delete(kind); else selectedTypes.add(kind);
+            const button = document.getElementById(kind + 'Filter');
+            button.setAttribute('aria-pressed', String(selectedTypes.has(kind)));
+            button.classList.toggle('btn-primary', selectedTypes.has(kind));
+            handleFilter();
+        }
+
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
@@ -273,7 +299,8 @@
 
         function toggleSidebar() {
             sidebar.classList.toggle('expanded');
-            sidebarToggle.innerHTML = sidebar.classList.contains('expanded') ? '◀' : '▶';
+            sidebarToggle.textContent = sidebar.classList.contains('expanded') ? '◀' : '☰';
+            sidebarToggle.setAttribute('aria-expanded', String(sidebar.classList.contains('expanded')));
         }
 
         function resetRender() {
@@ -500,7 +527,7 @@
             const repostMap = {};
             const createMap = {};
 
-            fullData.forEach(v => {
+            displayData.forEach(v => {
                 if (/^\d{4}-\d{2}-\d{2}$/.test(v.repost_date || '')) {
                     if (!repostMap[v.repost_date]) repostMap[v.repost_date] = [];
                     repostMap[v.repost_date].push(v);
@@ -514,19 +541,19 @@
             const sortedRepost = Object.keys(repostMap).sort((a, b) => b.localeCompare(a));
             const sortedCreate = Object.keys(createMap).sort((a, b) => b.localeCompare(a));
 
-            let html = '';
+            let html = '<div style="padding:8px 12px;color:#aaa;font-size:.8em">P: Post · S: Story · R: Repost · ?: Chưa rõ/khác</div>';
             if (sortedRepost.length > 0) {
                 html += `<div class="sb-section repost-sec">♻️ NGÀY REPOST (${sortedRepost.length})</div>`;
                 html += sortedRepost.map(date => 
                     `<div class="date-item" onclick="scrollToDate('${date}', 'repost')">
-                        <span>${date}</span><span class="date-count" style="color:#39ff14">${repostMap[date].length}</span>
+                        <span>${date}</span><span class="date-count" title="Post · Story · Repost · Chưa rõ" style="color:#39ff14">${typeSummary(repostMap[date])}</span>
                     </div>`
                 ).join('');
             }
             html += `<div class="sb-section create-sec">📅 NGÀY ĐĂNG (${sortedCreate.length})</div>`;
             html += sortedCreate.map(date => 
                 `<div class="date-item" onclick="scrollToDate('${date}', 'create')">
-                    <span>${date}</span><span class="date-count">${createMap[date].length}</span>
+                    <span>${date}</span><span class="date-count" title="Post · Story · Repost · Chưa rõ">${typeSummary(createMap[date])}</span>
                 </div>`
             ).join('');
 
@@ -534,14 +561,14 @@
         }
 
         window.scrollToDate = function(dateStr, type) {
-            if (window.innerWidth < 768) toggleSidebar();
+            if (window.innerWidth < 768) { sidebar.classList.remove('expanded'); sidebarToggle.textContent = '☰'; sidebarToggle.setAttribute('aria-expanded', 'false'); }
             let targetVid = null;
             
             if (type === 'repost') {
-                const candidates = fullData.filter(v => v.repost_date === dateStr);
+                const candidates = displayData.filter(v => v.repost_date === dateStr);
                 if (candidates.length > 0) targetVid = candidates[0];
             } else {
-                const candidates = fullData.filter(v => v.date === dateStr);
+                const candidates = displayData.filter(v => v.date === dateStr);
                 if (candidates.length > 0) {
                     candidates.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
                     targetVid = candidates[0];
@@ -549,13 +576,6 @@
             }
 
             if (targetVid) {
-                if (searchInput.value !== '' || captionOnly) {
-                    searchInput.value = '';
-                    captionOnly = false;
-                    document.getElementById('captionFilter').setAttribute('aria-pressed', 'false');
-                    document.getElementById('captionFilter').classList.remove('btn-primary');
-                    handleFilter(); 
-                }
                 jumpToId(targetVid.id);
             }
         };
@@ -567,7 +587,7 @@
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => (!captionOnly || String(v.repost_caption || '').trim()) && (
+            displayData = fullData.filter(v => (!selectedTypes.size || selectedTypes.has(contentType(v))) && (!captionOnly || String(v.repost_caption || '').trim()) && (
                 (v.nickname && v.nickname.toLowerCase().includes(term)) || 
                 (v.date && v.date.includes(term)) ||
                 (v.repost_date && v.repost_date.includes(term)) ||
@@ -596,6 +616,8 @@
                 displayData.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
             }
             
+            renderSidebar();
+            scrollArea.scrollTop = 0;
             renderDown();
         }
         

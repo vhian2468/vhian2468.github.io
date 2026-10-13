@@ -19,6 +19,8 @@
 !/auto_tiktok_repost.py
 !/tiktok_html_generator.py
 !/tiktok_thumb_manager.py
+!/tiktok_feed_types.py
+!/tiktok_story_sync.py
 
 # Backups, duplicate copies, logs and runtime state.
 *.bak*
@@ -28,6 +30,7 @@
 *-DESKTOP-*
 * - Copy*
 *.manager.state.json
+*.api_sources.json
 *.deleted_ids.json
 *.pipeline.json
 __pycache__/

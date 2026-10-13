@@ -14,6 +14,59 @@ import argparse
 import glob
 import hashlib
 import calendar
+import uuid
+from tiktok_story_sync import current_username, read_stories, sync_story_items
+from tiktok_feed_types import source_label, recover_sources, arrange_stories, source_metadata, latest_source_patches, infer_source_patches
+
+
+def apply_source_overlay(data, input_path):
+    path = input_path + '.api_sources.json'
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding='utf-8') as file:
+        patches = json.load(file).get('items', {})
+    for item in data:
+        if item.get('source_type', 'unknown') == 'unknown' or item.get('source_confidence') == 'inferred':
+            patch = patches.get(str(item['id']), {})
+            for key in ('source_type', 'source_types', 'source_apis', 'source_updated_at', 'source_confidence', 'source_basis'):
+                if key in patch:
+                    item[key] = patch[key]
+
+
+def sync_story_database(input_path, allow_deleted=False):
+    with open(input_path, 'rb') as file:
+        original = file.read()
+    raw = json.loads(original.decode('utf-8-sig'))
+    values = list(raw.values()) if isinstance(raw, dict) else raw
+    if not isinstance(values, list) or any(not isinstance(v, dict) or not v.get('id') for v in values):
+        raise ValueError('Database hiện tại không hợp lệ; không đồng bộ.')
+    data = [dict(v) for v in values]
+    stories, report = read_stories(current_username(input_path))
+    report = dict(report)
+    deleted = []
+    history_path = input_path + '.deleted_ids.json'
+    if os.path.isfile(history_path):
+        with open(history_path, encoding='utf-8') as file:
+            deleted = json.load(file)
+    updated, counts = sync_story_items(data, stories, allow_deleted, deleted)
+    if len(updated) < len(data):
+        raise ValueError('Đồng bộ làm giảm số lượng; không ghi database.')
+    with open(input_path, 'rb') as file:
+        if file.read() != original:
+            raise ValueError('Database đã thay đổi trong lúc đồng bộ; không ghi đè.')
+    backup = input_path + '.story-sync-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '-' + uuid.uuid4().hex + '.bak'
+    with open(backup, 'xb') as file:
+        file.write(original)
+        file.flush()
+        os.fsync(file.fileno())
+    atomic_write(input_path, json.dumps(updated, ensure_ascii=False, indent=2))
+    with open(input_path, 'rb') as file:
+        digest = hashlib.sha256(file.read()).hexdigest()
+    atomic_write(input_path + '.manager.state.json', json.dumps({'sha256': digest, 'edited_at': datetime.now().isoformat()}))
+    report.update(counts)
+    report['backup'] = backup
+    print('STORY SYNC: ' + json.dumps(report, ensure_ascii=False))
+    return report
 
 
 def enrich_music_from_logs(data, log_paths):
@@ -50,7 +103,8 @@ def enrich_music_from_logs(data, log_paths):
 def default_api_logs():
     folder = r'D:\tiktok\tiktok-repost\V4-2026'
     # Oldest first; never changes dates, order, captions or membership of database.
-    return sorted(glob.glob(os.path.join(folder, 'api_log.jsonl.*')), reverse=True) + sorted(glob.glob(os.path.join(folder, 'api_log*.jsonl')))
+    paths = sorted(glob.glob(os.path.join(folder, 'api_log.jsonl.*')), reverse=True) + sorted(glob.glob(os.path.join(folder, 'api_log*.jsonl')))
+    return list(dict.fromkeys(paths))  # New archive parts match both patterns.
 
 
 def extract_reposts(text):
@@ -75,23 +129,26 @@ def extract_reposts(text):
                 position += 1
     result = {}
 
-    def visit(value):
+    def visit(value, source_url=None):
         if isinstance(value, str):
             try:
-                visit(json.loads(value))
+                visit(json.loads(value), source_url)
             except (ValueError, TypeError):
                 pass
         elif isinstance(value, list):
             for child in value:
-                visit(child)
+                visit(child, source_url)
         elif isinstance(value, dict):
+            source_url = value.get('url') or source_url
             identifier = value.get('id', value.get('aweme_id'))
             if identifier and any(key in value for key in ('desc', 'video', 'uniqueId', 'author', 'repost_caption', 'aweme_desc')):
                 item = normalize_repost(value)
+                if source_url:
+                    item.update(source_metadata(value, source_url))
                 result[item['id']] = item
             else:
                 for child in value.values():
-                    visit(child)
+                    visit(child, source_url)
     for root in roots:
         visit(root)
     if not result:
@@ -124,6 +181,10 @@ def normalize_repost(item):
         })
         if isinstance(result['cover'], dict):
             urls = result['cover'].get('url_list', [])
+            result['cover'] = urls[0] if urls else ''
+        if not result['cover']:
+            cover = (item.get('imagePost') or {}).get('cover') or {}
+            urls = (cover.get('imageURL') or {}).get('urlList') or []
             result['cover'] = urls[0] if urls else ''
         # Store the original API object for fields not mapped by this version.
         result['api_raw'] = item
@@ -181,7 +242,8 @@ def generate_static_html(username, data_list):
                 --neon-green: #39ff14;
                 --neon-yellow: #fff01f;
             }
-            body { background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; }
+            body { background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+            * { box-sizing: border-box; }
             
             /* === SIDEBAR === */
             .sidebar { 
@@ -227,21 +289,25 @@ def generate_static_html(username, data_list):
             .sb-section.repost-sec { color: var(--neon-green); border-left: 4px solid var(--neon-green); }
             .sb-section.create-sec { color: var(--primary); border-left: 4px solid var(--primary); margin-top: 10px;}
 
-            .date-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.95em; display: flex; justify-content: space-between; color: #ccc; }
+            .date-item { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.9em; display: flex; flex-wrap: wrap; gap: 5px; justify-content: space-between; color: #ccc; }
             .date-item:hover, .date-item:active { background: #333; color: #fff; }
             .date-count { background: #444; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }
 
             /* MAIN CONTENT */
             .main-container { 
-                flex-grow: 1; display: flex; flex-direction: column; height: 100%; margin-left: 0; width: 100%; transition: margin-left 0.3s ease; 
+                flex-grow: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; margin-left: 0; width: 100%; transition: margin-left 0.3s ease;
             }
             
             .controls { background: #181818; padding: 10px; border-bottom: 1px solid #333; z-index: 100; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+            .controls { flex-shrink: 0; position: relative; max-height: 45dvh; overflow-y: auto; }
             .top-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
             .stats { font-size: 0.9em; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             
             .nav-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
             .nav-group { display: flex; gap: 5px; background: #222; padding: 4px; border-radius: 6px; align-items: center; }
+            .nav-bar { flex-shrink: 0; overscroll-behavior-x: contain; }
+            .nav-group { flex-shrink: 0; }
+            #searchInput { min-width: 0; }
             
             input, select, button { padding: 8px; border-radius: 6px; border: 1px solid #444; background: #2f2f2f; color: white; font-size: 14px; outline: none; }
             input:focus, select:focus { border-color: var(--primary); }
@@ -252,7 +318,7 @@ def generate_static_html(username, data_list):
             .btn-action { min-width: 60px; }
             .btn-danger { background: #822; border: none; }
 
-            .scroll-area { flex-grow: 1; overflow-y: auto; padding: 10px; -webkit-overflow-scrolling: touch; background: #000; }
+            .scroll-area { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; background: #000; }
             .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
             
             /* CARD DESIGN UPDATED */
@@ -290,7 +356,8 @@ def generate_static_html(username, data_list):
             @media (max-width: 768px) {
                 .grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
                 .controls { gap: 8px; }
-                .nav-bar { flex-wrap: wrap; }
+                .nav-bar { flex-wrap: nowrap; overflow-x: auto; }
+                .nav-search .nav-group { flex-shrink: 1; min-width: 0; }
                 .nickname { font-size: 0.9rem; }
                 .metrics { font-size: 0.75em; gap: 8px; }
                 .sidebar-toggle-arrow { height: 50px; width: 36px; font-size: 20px; top: 60px; }
@@ -305,9 +372,9 @@ def generate_static_html(username, data_list):
     </style>
     
     <div id="sidebar" class="sidebar">
-        <button class="sidebar-toggle-arrow" id="sidebarToggle" onclick="toggleSidebar()">▶</button>
         <div class="sidebar-header">
             <span class="sidebar-title">🗂 DATA MANAGER</span>
+            <button onclick="toggleSidebar()" aria-label="Đóng danh sách ngày">✕</button>
         </div>
         <div id="dateList" class="date-list"></div>
     </div>
@@ -315,13 +382,14 @@ def generate_static_html(username, data_list):
     <div id="mainContainer" class="main-container">
         <div class="controls">
             <div class="top-bar">
+                <button id="sidebarToggle" onclick="toggleSidebar()" aria-label="Mở danh sách ngày" aria-expanded="false">☰</button>
                 <div class="stats">
                     <span style="color:#fe2c55; font-weight:bold;">__USERNAME__</span> 
                     (<span id="totalCount">0</span> items)
                 </div>
             </div>
             
-            <div class="nav-bar">
+            <div class="nav-bar nav-search">
                 <div class="nav-group" style="flex-grow: 2;">
                     <input type="text" id="searchInput" placeholder="🔍 Username, nickname, ID, caption, hashtag, music..." style="width: 100%;">
                 </div>
@@ -353,6 +421,9 @@ def generate_static_html(username, data_list):
                 </div>
                 <div class="nav-group">
                     <button id="captionFilter" aria-pressed="false" onclick="toggleCaptionFilter()">💬 Có caption</button>
+                    <button id="postFilter" aria-pressed="false" onclick="toggleTypeFilter('post')">Post</button>
+                    <button id="storyFilter" aria-pressed="false" onclick="toggleTypeFilter('story')">Story</button>
+                    <button id="repostFilter" aria-pressed="false" onclick="toggleTypeFilter('repost')">Repost</button>
                     <button onclick="renderAll()" class="btn-danger">All</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
@@ -388,6 +459,7 @@ def generate_static_html(username, data_list):
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
         let captionOnly = false;
+        const selectedTypes = new Set();
         let unlocked = false;
         let unlocking = false;
 
@@ -420,6 +492,21 @@ def generate_static_html(username, data_list):
             handleFilter();
         }
 
+        function contentType(v) { return ['post', 'story', 'repost'].includes(v.source_type) ? v.source_type : 'unknown'; }
+        function typeSummary(records) {
+            const counts = {post:0, story:0, repost:0, unknown:0};
+            records.forEach(v => counts[contentType(v)]++);
+            return `P ${counts.post} · S ${counts.story} · R ${counts.repost}` + (counts.unknown ? ` · ? ${counts.unknown}` : '');
+        }
+        function toggleTypeFilter(kind) {
+            if (!unlocked) return;
+            if (selectedTypes.has(kind)) selectedTypes.delete(kind); else selectedTypes.add(kind);
+            const button = document.getElementById(kind + 'Filter');
+            button.setAttribute('aria-pressed', String(selectedTypes.has(kind)));
+            button.classList.toggle('btn-primary', selectedTypes.has(kind));
+            handleFilter();
+        }
+
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
@@ -435,7 +522,8 @@ def generate_static_html(username, data_list):
 
         function toggleSidebar() {
             sidebar.classList.toggle('expanded');
-            sidebarToggle.innerHTML = sidebar.classList.contains('expanded') ? '◀' : '▶';
+            sidebarToggle.textContent = sidebar.classList.contains('expanded') ? '◀' : '☰';
+            sidebarToggle.setAttribute('aria-expanded', String(sidebar.classList.contains('expanded')));
         }
 
         function resetRender() {
@@ -662,7 +750,7 @@ def generate_static_html(username, data_list):
             const repostMap = {};
             const createMap = {};
 
-            fullData.forEach(v => {
+            displayData.forEach(v => {
                 if (/^\d{4}-\d{2}-\d{2}$/.test(v.repost_date || '')) {
                     if (!repostMap[v.repost_date]) repostMap[v.repost_date] = [];
                     repostMap[v.repost_date].push(v);
@@ -676,19 +764,19 @@ def generate_static_html(username, data_list):
             const sortedRepost = Object.keys(repostMap).sort((a, b) => b.localeCompare(a));
             const sortedCreate = Object.keys(createMap).sort((a, b) => b.localeCompare(a));
 
-            let html = '';
+            let html = '<div style="padding:8px 12px;color:#aaa;font-size:.8em">P: Post · S: Story · R: Repost · ?: Chưa rõ/khác</div>';
             if (sortedRepost.length > 0) {
                 html += `<div class="sb-section repost-sec">♻️ NGÀY REPOST (${sortedRepost.length})</div>`;
                 html += sortedRepost.map(date => 
                     `<div class="date-item" onclick="scrollToDate('${date}', 'repost')">
-                        <span>${date}</span><span class="date-count" style="color:#39ff14">${repostMap[date].length}</span>
+                        <span>${date}</span><span class="date-count" title="Post · Story · Repost · Chưa rõ" style="color:#39ff14">${typeSummary(repostMap[date])}</span>
                     </div>`
                 ).join('');
             }
             html += `<div class="sb-section create-sec">📅 NGÀY ĐĂNG (${sortedCreate.length})</div>`;
             html += sortedCreate.map(date => 
                 `<div class="date-item" onclick="scrollToDate('${date}', 'create')">
-                    <span>${date}</span><span class="date-count">${createMap[date].length}</span>
+                    <span>${date}</span><span class="date-count" title="Post · Story · Repost · Chưa rõ">${typeSummary(createMap[date])}</span>
                 </div>`
             ).join('');
 
@@ -696,14 +784,14 @@ def generate_static_html(username, data_list):
         }
 
         window.scrollToDate = function(dateStr, type) {
-            if (window.innerWidth < 768) toggleSidebar();
+            if (window.innerWidth < 768) { sidebar.classList.remove('expanded'); sidebarToggle.textContent = '☰'; sidebarToggle.setAttribute('aria-expanded', 'false'); }
             let targetVid = null;
             
             if (type === 'repost') {
-                const candidates = fullData.filter(v => v.repost_date === dateStr);
+                const candidates = displayData.filter(v => v.repost_date === dateStr);
                 if (candidates.length > 0) targetVid = candidates[0];
             } else {
-                const candidates = fullData.filter(v => v.date === dateStr);
+                const candidates = displayData.filter(v => v.date === dateStr);
                 if (candidates.length > 0) {
                     candidates.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
                     targetVid = candidates[0];
@@ -711,13 +799,6 @@ def generate_static_html(username, data_list):
             }
 
             if (targetVid) {
-                if (searchInput.value !== '' || captionOnly) {
-                    searchInput.value = '';
-                    captionOnly = false;
-                    document.getElementById('captionFilter').setAttribute('aria-pressed', 'false');
-                    document.getElementById('captionFilter').classList.remove('btn-primary');
-                    handleFilter(); 
-                }
                 jumpToId(targetVid.id);
             }
         };
@@ -729,7 +810,7 @@ def generate_static_html(username, data_list):
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => (!captionOnly || String(v.repost_caption || '').trim()) && (
+            displayData = fullData.filter(v => (!selectedTypes.size || selectedTypes.has(contentType(v))) && (!captionOnly || String(v.repost_caption || '').trim()) && (
                 (v.nickname && v.nickname.toLowerCase().includes(term)) || 
                 (v.date && v.date.includes(term)) ||
                 (v.repost_date && v.repost_date.includes(term)) ||
@@ -758,6 +839,8 @@ def generate_static_html(username, data_list):
                 displayData.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
             }
             
+            renderSidebar();
+            scrollArea.scrollTop = 0;
             renderDown();
         }
         
@@ -809,6 +892,10 @@ class TikTokManagerApp:
         # --- LEFT: LIST & SEARCH ---
         self.left_frame = tk.Frame(self.paned)
         self.paned.add(self.left_frame, width=600)
+        tk.Button(self.left_frame, text="Phân loại / phục hồi post, story từ API log", command=self.recover_api_types).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text="Bổ sung loại chưa rõ từ log mới nhất (không sửa JSON gốc)", command=self.refresh_unknown_sources).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text="Phân loại tạm theo username (không sửa JSON gốc)", command=self.infer_unknown_sources).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text="Đồng bộ story của user hiện tại từ tiktok-story", command=self.sync_current_user_stories).pack(anchor='w', padx=5, pady=3)
         
         # Search Bar (Fixed: No 'placeholder' arg)
         self.search_var = tk.StringVar()
@@ -819,7 +906,9 @@ class TikTokManagerApp:
         tk.Entry(self.left_frame, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
         
         # Treeview (List)
-        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption"), show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption", "source_type"), show="headings", selectmode="extended")
+        self.tree.heading("source_type", text="Loại / Nguồn API")
+        self.tree.column("source_type", width=180)
         self.tree.heading("feed_index", text="#")
         self.tree.heading("date", text="Ngày tạo")
         self.tree.heading("nickname", text="Username / Nickname")
@@ -979,7 +1068,7 @@ class TikTokManagerApp:
         if not selections:
             return
         ids = {self.tree.item(row, 'tags')[0] for row in selections}
-        if not messagebox.askyesno('Xóa khỏi database', f'Xóa {len(ids)} repost khỏi database local?\nKhông tác động tài khoản TikTok. Bản trước khi xóa được lưu ở .manager.bak.'):
+        if not messagebox.askyesno('Xóa khỏi database', f'Xóa {len(ids)} repost khỏi database local?\nKhông tác động tài khoản TikTok. Bản trước khi xóa được lưu ở .manager.bak.\nID được ghi vào lịch sử để hỏi lại khi thu thập, không chặn vĩnh viễn.'):
             return
         old_list = self.data_list
         excluded_path = self.current_file + '.deleted_ids.json'
@@ -1010,6 +1099,104 @@ class TikTokManagerApp:
         if not filename: return
         self.load_path(filename)
 
+    def recover_api_types(self):
+        if not self.current_file:
+            return
+        if not messagebox.askyesno('Phân loại / phục hồi', 'Đọc API log để phân loại dữ liệu cũ và phục hồi post/story còn thiếu?\nKhông thêm đề xuất Explore, không xóa video hiện có, giữ ngày/caption bạn đã nhập.\nStory thiếu ngày repost sẽ dùng ngày đăng story làm mốc sắp xếp, không tự điền ngày repost.\nBản cũ được lưu ở .manager.bak.'):
+            return
+        old_list = self.data_list
+        try:
+            excluded = set()
+            excluded_path = self.current_file + '.deleted_ids.json'
+            if os.path.isfile(excluded_path):
+                with open(excluded_path, encoding='utf-8') as file:
+                    excluded = {str(v) for v in json.load(file)}
+            if excluded and messagebox.askyesno('Cập nhật video từng xóa', f'Có {len(excluded)} ID từng xóa. Cho phép phục hồi các ID này nếu tìm thấy trong API log?', default='yes'):
+                excluded = set()
+            profile = self.username.removesuffix('_all')
+            recovered, added = recover_sources(self.data_list, default_api_logs(), normalize_repost, excluded, profile)
+            self.data_list = arrange_stories(recovered)
+            for index, item in enumerate(self.data_list):
+                item['feed_index'] = index
+            self.data = {v['id']: v for v in self.data_list}
+            if not self.save_json_file():
+                self.data_list = old_list
+                self.data = {v['id']: v for v in old_list}
+                return
+            self.refresh_tree()
+            messagebox.showinfo('Hoàn tất', f'Đã phân loại theo log; phục hồi thêm {added} post/story.\nDữ liệu không có bằng chứng trong log vẫn hiển thị "chưa rõ".\nExplore đã có từ trước được đánh dấu, không tự xóa.')
+        except Exception as error:
+            self.data_list = old_list
+            self.data = {v['id']: v for v in old_list}
+            messagebox.showerror('Không phục hồi được', str(error))
+
+    def refresh_unknown_sources(self):
+        if not self.current_file:
+            return
+        try:
+            patches = latest_source_patches(self.data_list, default_api_logs(), self.username.removesuffix('_all'))
+            if not patches:
+                messagebox.showinfo('Phân loại', 'Không có bằng chứng mới cho các ID chưa rõ; giữ nguyên dữ liệu.')
+                return
+            path = self.current_file + '.api_sources.json'
+            previous = {}
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as file:
+                    previous = json.load(file).get('items', {})
+            previous.update(patches)
+            atomic_write(path, json.dumps({'version': 1, 'items': previous}, ensure_ascii=False, indent=2), backup=True)
+            apply_source_overlay(self.data_list, self.current_file)
+            self.refresh_tree()
+            messagebox.showinfo('Hoàn tất', f'Bổ sung nguồn cho {len(patches)} ID đã có, theo timestamp mới nhất.\nChỉ lưu .api_sources.json; JSON database gốc, nội dung và thứ tự không đổi.')
+        except Exception as error:
+            messagebox.showerror('Không bổ sung được nguồn', str(error))
+
+    def infer_unknown_sources(self):
+        if not self.current_file:
+            return
+        try:
+            patches = infer_source_patches(self.data_list, self.username.removesuffix('_all'))
+            if not patches:
+                messagebox.showinfo('Phân loại tạm', 'Không có mục chưa rõ đủ username để suy luận.')
+                return
+            if not messagebox.askyesno('Phân loại tạm', f'Áp dụng quy tắc username cho {len(patches)} ID chưa rõ?\nGiữ nguyên post duy nhất và các nguồn API đã xác định.\nKhông suy luận thời hạn story, không thay ngày/thứ tự, không sửa JSON gốc.'):
+                return
+            path = self.current_file + '.api_sources.json'
+            previous = {}
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as file:
+                    previous = json.load(file).get('items', {})
+            previous.update(patches)
+            atomic_write(path, json.dumps({'version': 1, 'items': previous}, ensure_ascii=False, indent=2), backup=True)
+            apply_source_overlay(self.data_list, self.current_file)
+            self.refresh_tree()
+            messagebox.showinfo('Hoàn tất', f'Đã phân loại tạm {len(patches)} ID. Nhãn "tạm theo username" được thay bằng thông tin API khi có log xác nhận.\nXuất HTML để cập nhật bộ lọc web.')
+        except Exception as error:
+            messagebox.showerror('Không phân loại tạm được', str(error))
+
+    def sync_current_user_stories(self):
+        if not self.current_file:
+            return
+        try:
+            profile = current_username(self.current_file)
+            stories, sources = read_stories(profile)
+            deleted = []
+            history_path = self.current_file + '.deleted_ids.json'
+            if os.path.isfile(history_path):
+                with open(history_path, encoding='utf-8') as file:
+                    deleted = json.load(file)
+            allow_deleted = bool(deleted) and messagebox.askyesno('Story từng xóa', 'Cho phép nhận lại story từng xóa nếu có trong dự án story?', default='yes')
+            _, counts = sync_story_items(self.data_list, stories, allow_deleted, deleted)
+            if not messagebox.askyesno('Đồng bộ story', f'Chỉ đồng bộ @{profile}: {len(stories)} story nguồn.\nThêm {counts["added"]}, khớp {counts["matched"]}, bỏ theo lựa chọn {counts["skipped_deleted"]}.\nGiữ ngày/caption đã lưu, không xóa mục hiện có, không sửa dự án nguồn.\nCó backup riêng không ghi đè. Hãy lưu các chỉnh sửa đang nhập trước khi tiếp tục.'):
+                return
+            report = sync_story_database(self.current_file, allow_deleted)
+            if report['metadata_fields_without_comparable_time']:
+                messagebox.showwarning('Timestamp dữ liệu cũ', f"Có {report['metadata_fields_without_comparable_time']} trường chưa đủ timestamp để so sánh; giữ giá trị đã có, không tự coi file sửa gần đây là API mới hơn.")
+            self.load_path(self.current_file, notify=False)
+            messagebox.showinfo('Đồng bộ xong', f'Thêm {report["added"]} story, bổ sung {report["updated"]} mục đã có.\nBackup: {report["backup"]}\nXuất HTML khi sẵn sàng.')
+        except Exception as error:
+            messagebox.showerror('Không đồng bộ được story', str(error))
+
     def load_path(self, filename, notify=True):
         
         try:
@@ -1028,6 +1215,7 @@ class TikTokManagerApp:
 
             # Tạo Map Dict nội bộ để tìm kiếm nhanh theo ID
             self.data_list = [normalize_repost(v) for v in self.data_list]
+            apply_source_overlay(self.data_list, filename)
             self.data = {v['id']: v for v in self.data_list}
             if len(self.data) != len(self.data_list):
                 raise ValueError('Database có ID trùng; hãy sửa bản sao trước khi mở')
@@ -1044,6 +1232,7 @@ class TikTokManagerApp:
             
             # Sort mặc định
             self.data_list.sort(key=lambda x: x.get('feed_index', 999999))
+            self.arrange_current_feed()
             self.selected_vid = None
             
             self.refresh_tree()
@@ -1064,11 +1253,12 @@ class TikTokManagerApp:
         for v in self.data_list:
             # Search filter
             match = False
+            if term in source_label(v).lower(): match = True
             if term in str(v.get('id', '')).lower(): match = True
             if term in str(v.get('desc', '')).lower(): match = True
             if term in str(v.get('nickname', '')).lower(): match = True
             if term in str(v.get('repost_date', '')).lower(): match = True
-            for key in ('uniqueId', 'date', 'repost_caption', 'hashtags', 'music_title', 'music_id', 'repost_order', 'feed_index'):
+            for key in ('uniqueId', 'date', 'repost_caption', 'hashtags', 'music_title', 'music_id', 'repost_order', 'feed_index', 'source_type', 'source_types', 'source_apis'):
                 if term in str(v.get(key, '')).lower(): match = True
             
             if not term or match:
@@ -1082,7 +1272,8 @@ class TikTokManagerApp:
                 '@' + v.get('uniqueId', '') + ' / ' + v.get('nickname', ''),
                 v.get('repost_date', ''),
                 v.get('repost_order', ''),
-                v.get('repost_caption', '')
+                v.get('repost_caption', ''),
+                source_label(v)
             ), tags=(v['id'],))
 
     def on_search(self, *args):
@@ -1184,8 +1375,15 @@ class TikTokManagerApp:
         v = self.data[self.selected_vid]
         v['repost_date'] = self.entry_repost_date.get().strip()
         v['repost_caption'] = self.entry_repost_cap.get().strip()
+        manual_fields = set(v.get('manual_fields', []))
         for key, entry in self.extra_entries.items():
-            v[key] = entry.get().strip()
+            value = entry.get().strip()
+            if str(v.get(key, '')) != value:
+                manual_fields.add(key)
+            v[key] = value
+        if manual_fields:
+            v['manual_fields'] = sorted(manual_fields)
+        self.arrange_current_feed()
         
         # Update UI List
         self.refresh_tree()
@@ -1264,6 +1462,7 @@ class TikTokManagerApp:
                         updates_count += 1
 
         if updates_count > 0:
+            self.arrange_current_feed()
             self.refresh_tree()
             self.save_json_file()
             messagebox.showinfo("Hoàn tất", f"Đã tự động điền ngày cho {updates_count} video!")
@@ -1272,6 +1471,7 @@ class TikTokManagerApp:
 
     def export_html(self):
         if not self.username: return
+        self.arrange_current_feed()
         html = generate_static_html(self.username, self.data_list)
         
         output_dir = os.path.dirname(os.path.abspath(self.current_file))
@@ -1289,6 +1489,11 @@ class TikTokManagerApp:
             
         messagebox.showinfo("Xuất HTML", f"Đã tạo xong:\n- {html_file}\n- {js_file}")
         webbrowser.open(html_file)
+
+    def arrange_current_feed(self):
+        self.data_list = arrange_stories(self.data_list)
+        for index, item in enumerate(self.data_list):
+            item['feed_index'] = index
 
     def save_json_file(self):
         if not self.current_file: return False
@@ -1314,6 +1519,7 @@ def export_automatically(input_path, output_dir=None, api_logs=None):
     with open(input_path, encoding='utf-8-sig') as file:
         raw = json.load(file)
     data = [normalize_repost(v) for v in (raw.values() if isinstance(raw, dict) else raw)]
+    apply_source_overlay(data, input_path)
     ids = [v['id'] for v in data]
     if len(set(ids)) != len(ids):
         raise ValueError('Database có ID trùng; không xuất HTML')
@@ -1322,6 +1528,9 @@ def export_automatically(input_path, output_dir=None, api_logs=None):
     output_dir = output_dir or os.path.dirname(os.path.abspath(input_path))
     os.makedirs(output_dir, exist_ok=True)
     added = enrich_music_from_logs(data, default_api_logs() if api_logs is None else api_logs)
+    data = arrange_stories(data)
+    for index, item in enumerate(data):
+        item['feed_index'] = index
     export_data = [{key: value for key, value in v.items() if key != 'api_raw'} for v in data]
     js_path = os.path.join(output_dir, f'data_{username}.js')
     html_path = os.path.join(output_dir, f'view_{username}.html')
@@ -1337,8 +1546,12 @@ if __name__ == '__main__':
     parser.add_argument('--auto', action='store_true', help='Xuất xong tự thoát, không mở GUI/browser')
     parser.add_argument('--input', default='data_pe.siro_phan_all.json')
     parser.add_argument('--output-dir')
+    parser.add_argument('--sync-stories', action='store_true', help='Đồng bộ story của user trong tên database, không mở GUI/xuất HTML')
+    parser.add_argument('--include-deleted', action='store_true', help='Cho phép nhận lại story từng xóa trong lần đồng bộ này')
     args = parser.parse_args()
-    if args.auto:
+    if args.sync_stories:
+        sync_story_database(args.input, args.include_deleted)
+    elif args.auto:
         export_automatically(args.input, args.output_dir)
     else:
         root = tk.Tk()

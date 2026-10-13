@@ -9,6 +9,7 @@ import threading
 from datetime import datetime
 import traceback
 import hashlib
+import time
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -202,6 +203,20 @@ def should_resume_v4(git_count, v4_count):
     return v4_count is not None and v4_count > git_count
 
 
+def wait_until_collecting(process, run_id):
+    """Do not charge browser setup/manual story wait to repost collection time."""
+    print('   ⏳ Chờ collector reload và bước thao tác post/story. Chưa tính thời gian bắt repost.')
+    while process.poll() is None:
+        try:
+            with open(COLLECTOR_STATUS_PATH, encoding='utf-8') as file:
+                state = json.load(file)
+            if state.get('run_id') == run_id and state.get('status') in ('collecting', 'saving', 'saved'):
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.2)
+
+
 def manager_edit_is_current():
     state_path = PATH_GIT_JSON + '.manager.state.json'
     if not os.path.isfile(state_path):
@@ -261,6 +276,7 @@ def main():
     print("=" * 60)
     print(f"PID điều phối: {os.getpid()}")
     auto_html = input('Tự động xuất HTML sau khi thu thập? (y = có, Enter/n = mở manager để chỉnh tay): ').strip().lower() == 'y'
+    sync_stories = input('Đồng bộ story user hiện tại từ D:\\tiktok\\tiktok-story? (y = có, Enter/n = không): ').strip().lower() == 'y'
     if os.path.isfile(PIPELINE_STATUS_PATH):
         try:
             with open(PIPELINE_STATUS_PATH, encoding='utf-8') as file:
@@ -318,6 +334,20 @@ def main():
     print("\n[Bước 2] Chuẩn bị chạy 'test_api_log - V2.py'.")
     choice = input("   👉 Tự động dừng? (y/Enter = 150s, n = không, hoặc nhập số giây): ").strip().lower()
     timeout_sec = parse_timeout(choice)
+    allow_deleted = False
+    deleted_history_path = PATH_V4_JSON + '.deleted_ids.json'
+    if os.path.isfile(deleted_history_path):
+        with open(deleted_history_path, encoding='utf-8') as file:
+            deleted_history = json.load(file)
+        if deleted_history:
+            answer = input(f'   👉 Có {len(deleted_history)} ID từng xóa. Cập nhật lại nếu API trả về? (Enter/y = có, n = bỏ qua phiên này): ').strip().lower()
+            allow_deleted = answer != 'n'
+    while True:
+        wait_choice = input('   👉 Chờ post/story sau reload bao nhiêu giây? (Enter = 60s; 0 = chờ đến khi bạn nhấn Enter): ').strip()
+        if not wait_choice or wait_choice.isdigit():
+            story_wait_seconds = int(wait_choice or '60')
+            break
+        print('   Hãy nhập số giây không âm.')
     mark_step('collector')
 
     print("   ⚙️ Đang chạy 'test_api_log - V2.py'...")
@@ -328,6 +358,8 @@ def main():
     child_env["TIKTOK_RUN_ID"] = collector_run_id
     stop_request_path = os.path.join(RUN_LOG_DIR, collector_run_id + ".stop")
     child_env["TIKTOK_STOP_FILE"] = stop_request_path
+    child_env['TIKTOK_STORY_WAIT_SECONDS'] = str(story_wait_seconds)
+    child_env['TIKTOK_INCLUDE_DELETED'] = '1' if allow_deleted else '0'
     p1 = subprocess.Popen(
         [sys.executable, "-u", COLLECTOR_SCRIPT],
         cwd=DIR_V4,
@@ -350,6 +382,7 @@ def main():
     output_thread.start()
 
     try:
+        wait_until_collecting(p1, collector_run_id)
         if timeout_sec:
             print(f"   ⏳ Sẽ tự dừng sau {timeout_sec} giây. Bạn có thể ấn Ctrl+C để dừng sớm.")
             p1.wait(timeout=timeout_sec)
@@ -394,6 +427,11 @@ def main():
     mark_step('publish_json')
     atomic_copy_json(PATH_V4_JSON, PATH_GIT_JSON, "V4 -> Git")
     print("   ✅ Publish atomic thành công!")
+    if sync_stories:
+        sync_command = [sys.executable, '-u', 'tiktok_html_generator.py', '--sync-stories', '--input', FILE_JSON]
+        if allow_deleted:
+            sync_command.append('--include-deleted')
+        run_logged_step('story_sync', sync_command, DIR_GIT)
 
     # BƯỚC 4: Chạy tiktok_thumb_manager
     print("\n[Bước 4] Đang chạy 'tiktok_thumb_manager.py' TỰ ĐỘNG...")
