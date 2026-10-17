@@ -433,6 +433,12 @@ def main():
             sync_command.append('--include-deleted')
         run_logged_step('story_sync', sync_command, DIR_GIT)
 
+    # Only import explicit manual fields, never API metadata/order. Opt-in network sync.
+    if os.path.isfile(PATH_GIT_JSON + '.manual_edits.json'):
+        run_logged_step('manual_overlay', [sys.executable, '-u', 'tiktok_html_generator.py', '--apply-manual-overlay', '--input', FILE_JSON], DIR_GIT)
+    if os.environ.get('TIKTOK_MANUAL_SYNC', '').strip() == '1':
+        run_logged_step('manual_gas_sync', [sys.executable, '-u', 'tiktok_html_generator.py', '--sync-manual', '--input', FILE_JSON], DIR_GIT)
+
     # BƯỚC 4: Chạy tiktok_thumb_manager
     print("\n[Bước 4] Đang chạy 'tiktok_thumb_manager.py' TỰ ĐỘNG...")
     atomic_copy_json(PATH_GIT_JSON, PATH_GIT_PIPELINE, "JSON staging cho thumbnail")

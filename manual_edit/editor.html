@@ -1,0 +1,25 @@
+<dialog id="manualDialog" class="manual-dialog" aria-labelledby="manualTitle">
+  <form id="manualForm">
+    <div class="manual-heading"><h3 id="manualTitle">Sửa ngày / caption repost</h3><button type="button" data-close="manualDialog" aria-label="Đóng">✕</button></div>
+    <p id="manualIdentity"></p>
+    <label>Ngày repost <input id="manualDate" type="date"></label>
+    <div class="manual-row"><button type="button" id="manualPreviousDay">−1 ngày</button><button type="button" id="manualLastDate">Ngày vừa dùng</button><button type="button" id="manualNextDay">+1 ngày</button></div>
+    <label>Caption repost <textarea id="manualCaption" rows="4" maxlength="5000"></textarea></label>
+    <p id="manualConflict" role="status"></p>
+    <div id="manualConflictActions" hidden><button type="button" id="manualKeepLocal">Giữ bản local, gửi lại</button><button type="button" id="manualUseServer">Dùng bản server</button></div>
+    <p id="manualFormMessage" role="status"></p>
+    <div class="manual-row"><button type="button" data-close="manualDialog">Hủy / giữ nháp</button><button type="submit" class="btn-primary">Lưu local</button><button type="button" id="manualSaveNext">Lưu & sửa tiếp</button></div>
+  </form>
+</dialog>
+<dialog id="manualSettings" class="manual-dialog" aria-labelledby="manualSettingsTitle">
+  <form id="manualSettingsForm">
+    <div class="manual-heading"><h3 id="manualSettingsTitle">Đồng bộ chỉnh sửa</h3><button type="button" data-close="manualSettings" aria-label="Đóng">✕</button></div>
+    <p>Lưu local trước, GAS xác nhận sau. Đóng trình duyệt có thể dừng đồng bộ; mở lại để tiếp tục. Token không nằm trong HTML hoặc bản export.</p>
+    <label>GAS Web App URL <input id="manualGasUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec"></label>
+    <button type="button" id="manualSaveUrl">Lưu URL API (không cần token)</button>
+    <label>Token riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
+    <p>URL mặc định có thể cài trong manager trước khi xuất HTML; URL lưu tại đây được nhớ trên thiết bị cho user này. Token chỉ giữ trong tab hiện tại.</p>
+    <div class="manual-row"><button type="submit" class="btn-primary">Kết nối & đồng bộ</button><button type="button" id="manualDisconnect">Ngắt GAS</button><button type="button" id="manualExport">Xuất backup JSON</button></div>
+    <p id="manualSettingsMessage" role="status"></p>
+  </form>
+</dialog>

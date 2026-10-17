@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><script>
+(() => {
+  const config = <?!= config ?>;
+  function announce() { window.top.postMessage({type:'manual-bridge-ready',channel:config.channel},config.origin); }
+  window.addEventListener('message',event => {
+    const message = event.data;
+    if(event.source !== window.top || event.origin !== config.origin || !message || message.type !== 'manual-rpc' || message.channel !== config.channel) return;
+    const reply = result => event.source.postMessage({type:'manual-rpc-response',channel:config.channel,id:message.id,result},event.origin);
+    google.script.run.withSuccessHandler(reply).withFailureHandler(error => reply({ok:false,error:error.message || 'GAS error'})).manualRpc(message.payload);
+  });
+  announce();
+})();
+</script></body></html>

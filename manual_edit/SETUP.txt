@@ -1,0 +1,95 @@
+SỬA NGÀY / CAPTION TRÊN HTML — BẢN 2026-10-17
+
+1. DÙNG NGAY, CHƯA CẦN GAS
+Mở HTML mới, nhập 2211 trong Ord như cũ. Bật Edit, bấm bút ở góc video.
+Bấm ảnh vẫn mở link TikTok. Lưu local cập nhật ngay và không đổi vị trí cuộn.
+Ngày có lịch, ±1 ngày, Ngày vừa dùng, Lưu & sửa tiếp theo danh sách đang xem.
+Nháp và thay đổi đã lưu nằm trong IndexedDB trên thiết bị/trình duyệt hiện tại.
+Không xóa dữ liệu trình duyệt/đổi trình duyệt khi còn chỉnh sửa chưa đồng bộ.
+Chế độ ẩn danh không thích hợp lưu lâu dài. Nên xuất backup JSON định kỳ.
+
+Lưu/Sync > Xuất backup JSON. Trong manager: Nhập backup chỉnh sửa HTML.
+Chỉ repost_date và repost_caption được nhập. Không thêm video, đổi thứ tự,
+thay số liệu API hoặc phân loại. ID không còn trong DB được báo lại, không phục hồi.
+Xung đột với bản manager giữ nguyên local, ghi *.manual_edits.conflicts.json.
+Backup JSON chứa lịch sử chỉnh sửa; KHÔNG có token. Không đưa backup lên GitHub.
+
+2. THIẾT LẬP GOOGLE APPS SCRIPT (GAS) MỘT LẦN
+Tạo Apps Script project mới trên tài khoản Google của bạn.
+- Copy Code.gs vào file Code.gs của project.
+- Thêm file HTML tên Bridge, copy nội dung Bridge.html.
+- setup_ kết thúc bằng dấu _ nên có thể không hiện trong danh sách Chạy.
+  Thêm tạm ở cuối Code.gs: function khoiTaoMotLan() { setup_(); }
+  Lưu, chọn khoiTaoMotLan rồi Chạy, cấp quyền tạo/ghi Sheets khi Google hỏi.
+  Chạy xong xóa riêng hàm khoiTaoMotLan, giữ setup_, lưu trước khi deploy.
+  KHÔNG deploy hàm khởi tạo thành API.
+- Project Settings > Script properties sẽ có:
+  API_TOKEN: token riêng được tạo tự động; giữ kín, khác mã mở giao diện 2211.
+  SPREADSHEET_ID: ID bảng mới; mở https://docs.google.com/spreadsheets/d/<ID>/edit
+  ALLOWED_PROFILE: pe.siro_phan (chỉ user này).
+  ALLOWED_ORIGINS: https://vhian2468.github.io
+  Có thể thêm origin localhost chính xác, ngăn bằng dấu phẩy, nếu cần chạy thử.
+  Không thêm dấu / ở cuối origin, không dùng dấu *.
+- Deploy > New deployment > Web app. Execute as: Me. Access: Anyone.
+  Nếu tổ chức chặn chế độ Anyone thì phải đổi cấu hình/tài khoản phù hợp;
+  đừng tắt kiểm tra token để chữa lỗi. Copy URL kết thúc bằng /exec.
+- Trong HTML: Lưu/Sync > nhập URL và API_TOKEN > Kết nối & đồng bộ.
+  URL nhớ trên thiết bị, token chỉ nhớ trong phiên tab hiện tại.
+  Kiểm tra trạng thái rồi kiểm tra dòng tương ứng trong sheet Edits.
+  Lần đầu thử sửa 1 caption và 1 ngày trước khi sửa hàng loạt.
+- Để khỏi nhập URL mỗi lần xuất HTML: mở manager, chọn database của user,
+  bấm Cài URL API (GAS) cho HTML, dán URL /exec rồi lưu. Bấm Xuất HTML.
+  Tool nhớ URL trong manual_edit/endpoint_settings.json (chỉ URL công khai,
+  tuyệt đối không lưu token). HTML mới tự điền URL trên cả thiết bị mới.
+  Nút Nhận ngày/caption từ GAS cũng tự dùng URL đã cài, chỉ hỏi token.
+  Trên HTML có nút Lưu URL API riêng, không yêu cầu token để nhớ URL trên thiết bị.
+  Khi đổi URL mặc định trong manager rồi xuất lại, HTML nhận mặc định mới.
+  Token vẫn nhập riêng. Không dùng URL /dev hoặc URL có ?token=... để cấu hình.
+- Sửa code GAS sau này: Deploy > Manage deployments > Edit > New version.
+
+Journal là lịch sử có thẩm quyền, chỉ nối thêm, không tự xóa.
+Edits là bảng tổng hợp để xem/lọc/xuất Excel (.xlsx), không sửa trực tiếp tại sheet:
+sửa tay Edits không được đồng bộ ngược và có thể bị tái tạo từ Journal.
+Đây là Google Sheets, không phải ghi trực tiếp vào file Excel trên máy.
+Không chia sẻ quyền chỉnh sửa bảng/project hoặc API_TOKEN cho người lạ.
+Nếu token lộ, đổi API_TOKEN trong Script properties rồi nhập token mới ở thiết bị.
+Frontend 2211 chỉ giấu giao diện, không bảo vệ dữ liệu public trên GitHub Pages.
+GAS có xác thực token riêng, chỉ chấp nhận hai trường chỉnh sửa trên.
+
+3. LƯU LOCAL / ĐỒNG BỘ ONLINE
+Lưu local thành công mới đóng hộp sửa. Gửi nền khi tab đang mở và có mạng.
+Không báo thành công online khi GAS chưa xác nhận. Nếu chậm/lỗi, hàng đợi vẫn còn.
+Tự thử lại mỗi 30 giây khi trang đang hiện, khi có mạng hoặc quay lại trang.
+Đóng browser có thể dừng gửi: mở lại, nhập token nếu cần để gửi tiếp.
+Không hứa đồng bộ nền khi đã đóng browser hoặc điện thoại tắt ứng dụng.
+Mỗi thao tác có ID duy nhất; gửi lại không tạo dòng trùng trong Journal.
+Hai thiết bị sửa cùng video: bản đến sau có xung đột, mở bút chọn giữ local/server.
+Không tự lấy “bản mới nhất” nếu chưa biết bạn muốn giữ bản nào.
+HTML file:// dùng local được tùy chính sách browser; GAS cần HTTPS/localhost.
+GAS iframe có thể bị extension/chính sách cookie/trình duyệt chặn; thử browser thường.
+Hạn mức GAS/Sheets vẫn áp dụng; lượng lưu lớn sẽ chậm vì đọc Journal để bảo toàn lịch sử.
+
+4. NHẬN VỀ DATABASE PYTHON
+Manager có nút Nhận ngày/caption từ GAS, nhập URL và token, không ghi token ra file.
+Hoặc dùng các lệnh sau trong thư mục GitHub (không dán token vào lệnh chia sẻ):
+  python tiktok_html_generator.py --import-manual <backup.json> --input data_pe.siro_phan_all.json
+  python tiktok_html_generator.py --sync-manual --input data_pe.siro_phan_all.json
+Lệnh sync đọc biến môi trường TIKTOK_GAS_URL và TIKTOK_GAS_TOKEN.
+Auto chỉ kéo online khi biến TIKTOK_MANUAL_SYNC=1; mặc định KHÔNG kéo online.
+Auto áp lại sổ chỉnh sửa đã nhập trước bước thumbnail; có xung đột thì giữ local.
+Sổ *.manual_edits.json, report và backup không đưa lên GitHub.
+Mỗi lần DB thật sự đổi tạo backup .manual-edit-<thời gian>-<uuid>.bak; không tự dọn.
+Lần nhập không đổi dữ liệu không tạo thêm backup DB. Không sửa API log.
+Sau nhập, xem report, sửa xung đột nếu có rồi tự xuất HTML như quy trình cũ.
+Đừng chạy đồng thời manager/auto/collector ghi cùng một database.
+
+5. TRẠNG THÁI BÀN GIAO
+Code frontend, backend và Python được kiểm thử với dữ liệu giả lập.
+GAS thật chưa deploy: cần tài khoản/quyền Google và URL/token của bạn.
+Chưa tự đẩy GitHub, chưa thay đổi DB thật hoặc cấu hình tài khoản Google.
+APK là giai đoạn tiếp theo, chưa build/ký/cài trong đợt nâng cấp này.
+
+Tài liệu Google chính thức:
+https://developers.google.com/apps-script/guides/html/communication
+https://developers.google.com/apps-script/guides/web
+https://developers.google.com/apps-script/guides/content

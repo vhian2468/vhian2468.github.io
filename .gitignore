@@ -21,6 +21,8 @@
 !/tiktok_thumb_manager.py
 !/tiktok_feed_types.py
 !/tiktok_story_sync.py
+!/tiktok_manual_edits.py
+!/manual_edit/
 
 # Backups, duplicate copies, logs and runtime state.
 *.bak*
@@ -33,5 +35,9 @@
 *.api_sources.json
 *.deleted_ids.json
 *.pipeline.json
+*.manual_edits.json
+*.manual_edits.conflicts.json
+manual-edits-*.json
+.env*
 __pycache__/
 *.pyc

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import json
 import os
 import time
@@ -15,6 +15,9 @@ import glob
 import hashlib
 import calendar
 import uuid
+import threading
+import sys
+from tiktok_manual_edits import inject_editor, import_records, pull_annotations, reapply_saved_annotations, saved_gas_url, save_gas_url
 from tiktok_story_sync import current_username, read_stories, sync_story_items
 from tiktok_feed_types import source_label, recover_sources, arrange_stories, source_metadata, latest_source_patches, infer_source_patches
 
@@ -511,7 +514,8 @@ def generate_static_html(username, data_list):
             return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
-        function startApp() {
+        async function startApp() {
+            if(window.tiktokManualEditor) await window.tiktokManualEditor.init(fullData);
             document.getElementById('totalCount').innerText = fullData.length;
             displayData = [...fullData];
             renderSidebar();
@@ -569,6 +573,7 @@ def generate_static_html(username, data_list):
                 else { img.onerror = null; img.classList.add('error'); }
             };
             img.src = safeImage(v.cover_off) || online;
+            if(window.tiktokManualEditor) window.tiktokManualEditor.addButton(el,v);
             return el;
         }
 
@@ -852,7 +857,7 @@ def generate_static_html(username, data_list):
     """
     html_content = html_template.replace("__USERNAME__", html_lib.escape(username, quote=True))
     html_content = html_content.replace("__TIMESTAMP__", str(int(time.time())))
-    return html_content
+    return inject_editor(html_content, username)
 
 # ================= GUI APP =================
 class TikTokManagerApp:
@@ -896,6 +901,11 @@ class TikTokManagerApp:
         tk.Button(self.left_frame, text="Bổ sung loại chưa rõ từ log mới nhất (không sửa JSON gốc)", command=self.refresh_unknown_sources).pack(anchor='w', padx=5, pady=3)
         tk.Button(self.left_frame, text="Phân loại tạm theo username (không sửa JSON gốc)", command=self.infer_unknown_sources).pack(anchor='w', padx=5, pady=3)
         tk.Button(self.left_frame, text="Đồng bộ story của user hiện tại từ tiktok-story", command=self.sync_current_user_stories).pack(anchor='w', padx=5, pady=3)
+        manual_row = tk.Frame(self.left_frame)
+        manual_row.pack(anchor='w', padx=5, pady=3)
+        tk.Button(manual_row, text='Nhận ngày/caption từ GAS', command=self.pull_manual_edits).pack(side='left')
+        tk.Button(manual_row, text='Nhập backup chỉnh sửa HTML', command=self.import_manual_backup).pack(side='left', padx=5)
+        tk.Button(self.left_frame, text='Cài URL API (GAS) cho HTML', command=self.configure_manual_url).pack(anchor='w', padx=5, pady=3)
         
         # Search Bar (Fixed: No 'placeholder' arg)
         self.search_var = tk.StringVar()
@@ -1062,6 +1072,64 @@ class TikTokManagerApp:
         tk.Button(buttons, text='📂 Chọn file', command=choose_file).pack(side='left')
         tk.Button(buttons, text='Mẫu nhập thủ công', command=manual_template).pack(side='left', padx=8)
         tk.Button(buttons, text='Thêm vào database', command=apply_import, bg='#ddffdd').pack(side='right')
+
+    def manual_report(self, report):
+        self.load_path(self.current_file, notify=False)
+        messagebox.showinfo('Chỉnh sửa HTML', f"Đã cập nhật {report['changed_fields']} trường.\nXung đột giữ nguyên local: {len(report['conflicts'])}.\nID không còn trong database (không tự thêm lại): {len(report['missing_ids'])}.\nChi tiết xung đột: {self.current_file}.manual_edits.conflicts.json\nBackup: {report.get('backup') or 'Không thay đổi database'}\nChọn Xuất HTML khi bạn sẵn sàng.")
+
+    def import_manual_backup(self):
+        if not self.current_file: return
+        filename = filedialog.askopenfilename(title='Backup từ nút Lưu/Sync trên HTML', filetypes=[('JSON', '*.json')])
+        if not filename: return
+        if not self.save_json_file(): return
+        try:
+            with open(filename, encoding='utf-8-sig') as file:
+                report = import_records(self.current_file, json.load(file))
+            self.manual_report(report)
+        except Exception as error:
+            messagebox.showerror('Không nhập được chỉnh sửa', str(error))
+
+    def configure_manual_url(self):
+        if not self.current_file:
+            messagebox.showinfo('Cài URL API', 'Chọn database của user trước.'); return
+        try:
+            profile = self.username.removesuffix('_all')
+            url = simpledialog.askstring('Cài URL API (GAS)', 'URL Web App GAS (/exec), không nhập token ở đây.\nĐể trống để bỏ mặc định; Cancel để giữ nguyên.\nLần xuất HTML tiếp theo sẽ tự dùng URL này:', initialvalue=saved_gas_url(profile), parent=self.root)
+            if url is None: return
+            save_gas_url(profile, url)
+            messagebox.showinfo('Đã lưu URL API', 'Đã nhớ URL cho user này.\nBấm Xuất HTML để cập nhật trang hiện có.\nKhông thay đổi database hoặc nhúng token.')
+        except Exception as error:
+            messagebox.showerror('Không lưu được URL API', str(error))
+
+    def pull_manual_edits(self):
+        if not self.current_file: return
+        try:
+            url = os.environ.get('TIKTOK_GAS_URL','') or saved_gas_url(self.username)
+        except Exception as error:
+            messagebox.showerror('Cấu hình GAS', str(error)); return
+        if not url:
+            url = simpledialog.askstring('GAS', 'GAS Web App URL (/exec):', parent=self.root)
+        if not url: return
+        token = simpledialog.askstring('GAS', 'Token riêng (không lưu vào file):', show='*', parent=self.root)
+        if not token: return
+        if not self.save_json_file(): return
+        # Pull remotely on a worker; disable manager edits during the merge.
+        path, result = self.current_file, {}
+        overlay = tk.Toplevel(self.root)
+        overlay.title('Đang nhận chỉnh sửa')
+        tk.Label(overlay, text='Đang nhận từ GAS… Có thể mất vài chục giây.\nKhông đóng manager trong lúc này.', padx=25, pady=25).pack()
+        overlay.transient(self.root); overlay.grab_set(); overlay.protocol('WM_DELETE_WINDOW', lambda: None)
+        def work():
+            try: result['report'] = pull_annotations(path, url, token)
+            except Exception as error: result['error'] = str(error)
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        def poll():
+            if worker.is_alive(): self.root.after(150, poll); return
+            overlay.grab_release(); overlay.destroy()
+            if 'error' in result: messagebox.showerror('GAS chưa đồng bộ', result['error'])
+            else: self.manual_report(result['report'])
+        self.root.after(150, poll)
 
     def delete_reposts(self):
         selections = self.tree.selection()
@@ -1542,14 +1610,27 @@ def export_automatically(input_path, output_dir=None, api_logs=None):
 
 
 if __name__ == '__main__':
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description='TikTok manager và HTML exporter')
     parser.add_argument('--auto', action='store_true', help='Xuất xong tự thoát, không mở GUI/browser')
     parser.add_argument('--input', default='data_pe.siro_phan_all.json')
     parser.add_argument('--output-dir')
     parser.add_argument('--sync-stories', action='store_true', help='Đồng bộ story của user trong tên database, không mở GUI/xuất HTML')
     parser.add_argument('--include-deleted', action='store_true', help='Cho phép nhận lại story từng xóa trong lần đồng bộ này')
+    parser.add_argument('--sync-manual', action='store_true', help='Nhận ngày/caption GAS; URL/token từ biến môi trường, không xuất HTML')
+    parser.add_argument('--import-manual', metavar='BACKUP_JSON', help='Nhập backup chỉnh sửa từ HTML, không xuất HTML')
+    parser.add_argument('--apply-manual-overlay', action='store_true', help='Áp lại ghi nhận chỉnh sửa local an toàn, không kết nối GAS')
     args = parser.parse_args()
-    if args.sync_stories:
+    if args.sync_manual:
+        print(json.dumps(pull_annotations(args.input), ensure_ascii=False))
+    elif args.import_manual:
+        with open(args.import_manual, encoding='utf-8-sig') as file:
+            print(json.dumps(import_records(args.input, json.load(file)), ensure_ascii=False))
+    elif args.apply_manual_overlay:
+        print(json.dumps(reapply_saved_annotations(args.input), ensure_ascii=False))
+    elif args.sync_stories:
         sync_story_database(args.input, args.include_deleted)
     elif args.auto:
         export_automatically(args.input, args.output_dir)
