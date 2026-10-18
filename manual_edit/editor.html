@@ -18,8 +18,9 @@
     <label>GAS Web App URL <input id="manualGasUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec"></label>
     <button type="button" id="manualSaveUrl">Lưu URL API (không cần token)</button>
     <label>Token riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
-    <p>URL mặc định có thể cài trong manager trước khi xuất HTML; URL lưu tại đây được nhớ trên thiết bị cho user này. Token chỉ giữ trong tab hiện tại.</p>
-    <div class="manual-row"><button type="submit" class="btn-primary">Kết nối & đồng bộ</button><button type="button" id="manualDisconnect">Ngắt GAS</button><button type="button" id="manualExport">Xuất backup JSON</button></div>
+    <label class="manual-remember"><input id="manualRememberToken" type="checkbox" checked> Nhớ token trên thiết bị này</label>
+    <p>Chỉ bật trên thiết bị cá nhân. Token được lưu trong trình duyệt theo user và URL GAS, không nhúng vào HTML hoặc backup. Người/mã chạy trên cùng website có thể đọc bộ nhớ trình duyệt.</p>
+    <div class="manual-row"><button type="submit" class="btn-primary">Kết nối & đồng bộ</button><button type="button" id="manualDisconnect">Ngắt GAS</button><button type="button" id="manualForgetToken">Quên token</button><button type="button" id="manualExport">Xuất backup JSON</button></div>
     <p id="manualSettingsMessage" role="status"></p>
   </form>
 </dialog>

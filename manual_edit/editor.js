@@ -4,6 +4,8 @@
   const profile = MANUAL_PROFILE;
   const defaultUrl = typeof MANUAL_DEFAULT_GAS_URL === 'string' ? MANUAL_DEFAULT_GAS_URL : '';
   const urlKey = 'tiktok-gas-url:'+profile+':'+defaultUrl;
+  const tokenKey = () => 'tiktok-gas-token:'+profile+':'+gasUrl;
+  const rememberKey = 'tiktok-remember-token:'+profile;
   const fields = ['repost_date','repost_caption'];
   const empty = () => ({records:{},outbox:[],history:[],drafts:{},cursor:0,lastDate:''});
   let db, state = empty(), videos = new Map(), baseline = new Map(), ready = false, busy = false;
@@ -75,7 +77,8 @@
     try {
       db = await openDB(); state = await readState(); ready = true;
       gasUrl = localStorage.getItem(urlKey) || defaultUrl || localStorage.getItem('tiktok-gas-url') || '';
-      token = sessionStorage.getItem('tiktok-gas-token') || '';
+      token = localStorage.getItem(tokenKey()) || sessionStorage.getItem(tokenKey()) || '';
+      $('manualRememberToken').checked = localStorage.getItem(rememberKey) !== 'false';
       $('manualGasUrl').value = gasUrl; $('manualGasToken').value = token;
       $('manualEditToggle').disabled = false; applyLocal();
     } catch(error) { lastError = 'Không mở được lưu trữ: '+error.message; }
@@ -162,7 +165,7 @@
   }
   function disconnect() {
     clearTimeout(bridgeTimer); connectReject?.(new Error('Đã ngắt kết nối')); connectReject = null;
-    token = ''; sessionStorage.removeItem('tiktok-gas-token'); peer = null; bridgeReady = null;
+    token = ''; peer = null; bridgeReady = null;
     if(bridge) bridge.remove(); bridge = null;
     requests.forEach(p => { clearTimeout(p.timer); p.reject(new Error('Đã ngắt kết nối')); }); requests.clear();
     showStatus();
@@ -207,7 +210,12 @@
     try {
       state = await readState();
       const blocked = new Set(state.outbox.filter(op => op.status === 'conflict').map(op => op.video_id));
-      const ops = state.outbox.filter(op => !blocked.has(op.video_id)).slice(0,20);
+      const ops = []; let payloadSize = 2048;
+      for(const op of state.outbox.filter(op => !blocked.has(op.video_id))) {
+        const size = JSON.stringify(op).length;
+        if(ops.length >= 20 || (ops.length && payloadSize + size > 150000)) break;
+        ops.push(op); payloadSize += size;
+      }
       const response = await rpc({action:'sync',profile,cursor:state.cursor,ops});
       if(!response?.ok) throw new Error(response?.error || 'Phản hồi GAS không hợp lệ');
       await mutate(s => {
@@ -251,6 +259,19 @@
   document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => button.dataset.close === 'manualDialog' ? closeEditor() : $(button.dataset.close).close());
   $('manualDialog').addEventListener('cancel',event => { event.preventDefault(); closeEditor(); });
   $('manualDisconnect').onclick = disconnect; $('manualExport').onclick = () => exportBackup().catch(reportError);
+  $('manualForgetToken').onclick = () => {
+    try {
+      localStorage.removeItem(tokenKey()); sessionStorage.removeItem(tokenKey());
+      sessionStorage.removeItem('tiktok-gas-token'); disconnect(); $('manualGasToken').value = '';
+      $('manualSettingsMessage').textContent = 'Đã quên token cho user và URL này. Dữ liệu chỉnh sửa local vẫn giữ nguyên.';
+    } catch(error) { reportError(error); }
+  };
+  $('manualRememberToken').onchange = () => {
+    try {
+      localStorage.setItem(rememberKey,String($('manualRememberToken').checked));
+      if(!$('manualRememberToken').checked) localStorage.removeItem(tokenKey());
+    } catch(error) { reportError(error); }
+  };
   function saveUrl() {
     const value = $('manualGasUrl').value.trim();
     if(value && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(value)) throw new Error('Cần URL GAS /exec, không kèm token hay tham số.');
@@ -265,7 +286,13 @@
   };
   $('manualSettingsForm').onsubmit = event => {
     event.preventDefault();
-    try { saveUrl(); disconnect(); token = $('manualGasToken').value.trim(); sessionStorage.setItem('tiktok-gas-token',token); }
+    try {
+      saveUrl(); disconnect(); token = $('manualGasToken').value.trim();
+      sessionStorage.setItem(tokenKey(),token);
+      const remember = $('manualRememberToken').checked;
+      localStorage.setItem(rememberKey,String(remember));
+      if(remember && token) localStorage.setItem(tokenKey(),token); else localStorage.removeItem(tokenKey());
+    }
     catch(error) { $('manualSettingsMessage').textContent = 'Chưa kết nối: '+error.message; return; }
     $('manualSettingsMessage').textContent = 'Đang thử kết nối; xem trạng thái trên thanh điều hướng.'; sync();
   };

@@ -11,5 +11,7 @@ body.manual-edit-mode .manual-edit-button { display:block; }
 .manual-row { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
 #manualSyncStatus { font-size:.8rem; color:#b4cee9; padding:6px 0; white-space:normal; }
 #manualConflict { color:#ffd278; }
+.manual-dialog .manual-remember { display:flex; align-items:center; gap:8px; }
+.manual-dialog .manual-remember input { width:auto; margin:0; }
 #manualConflictActions[hidden] { display:none; }
 @media(max-width:768px) { .manual-dialog { position:fixed; inset:auto 0 0; margin:0 auto; width:100%; border-radius:14px 14px 0 0; padding-bottom:max(16px,env(safe-area-inset-bottom)); } }

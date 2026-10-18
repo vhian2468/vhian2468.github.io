@@ -34,7 +34,10 @@ Tạo Apps Script project mới trên tài khoản Google của bạn.
   Nếu tổ chức chặn chế độ Anyone thì phải đổi cấu hình/tài khoản phù hợp;
   đừng tắt kiểm tra token để chữa lỗi. Copy URL kết thúc bằng /exec.
 - Trong HTML: Lưu/Sync > nhập URL và API_TOKEN > Kết nối & đồng bộ.
-  URL nhớ trên thiết bị, token chỉ nhớ trong phiên tab hiện tại.
+  URL nhớ trên thiết bị. Bật Nhớ token trên thiết bị này để không phải nhập lại.
+  Bỏ chọn thì token chỉ giữ trong phiên tab; Quên token xóa bản lưu của URL/user này.
+  Chỉ nên bật nhớ trên thiết bị cá nhân: token nằm trong localStorage, mã chạy
+  trên cùng origin có thể đọc được. Token không được nhúng vào HTML hoặc backup.
   Kiểm tra trạng thái rồi kiểm tra dòng tương ứng trong sheet Edits.
   Lần đầu thử sửa 1 caption và 1 ngày trước khi sửa hàng loạt.
 - Để khỏi nhập URL mỗi lần xuất HTML: mở manager, chọn database của user,
@@ -85,9 +88,10 @@ Sau nhập, xem report, sửa xung đột nếu có rồi tự xuất HTML như 
 
 5. TRẠNG THÁI BÀN GIAO
 Code frontend, backend và Python được kiểm thử với dữ liệu giả lập.
-GAS thật chưa deploy: cần tài khoản/quyền Google và URL/token của bạn.
-Chưa tự đẩy GitHub, chưa thay đổi DB thật hoặc cấu hình tài khoản Google.
-APK là giai đoạn tiếp theo, chưa build/ký/cài trong đợt nâng cấp này.
+Việc deploy/cấp quyền GAS do bạn thực hiện trong tài khoản Google của mình.
+Codex chưa tự đẩy GitHub hoặc thay đổi cấu hình tài khoản Google.
+Dự án APK riêng nằm tại D:/tiktok/tiktok-repost/V4-2026/android_repost;
+xem README.md ở đó để cài và dùng, không đưa toolchain/khóa ký lên GitHub.
 
 Tài liệu Google chính thức:
 https://developers.google.com/apps-script/guides/html/communication
