@@ -10,6 +10,11 @@ from datetime import datetime
 import traceback
 import hashlib
 import time
+from contextlib import ExitStack
+from tiktok_database_guard import database_lock, snapshot, commit_bytes, validate_bytes, local_authority_is_current
+import tiktok_feed_authority as feed_state
+
+_CURRENT_VERSION = object()
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -158,35 +163,40 @@ def validate_json_file(path, label="JSON"):
     return len(data)
 
 
-def atomic_copy_json(source, destination, label="JSON"):
-    """Copy qua file tam; destination chi thay doi sau khi ban copy hop le."""
-    expected_count = validate_json_file(source, f"{label} nguồn")
-    destination_dir = os.path.dirname(destination)
-    os.makedirs(destination_dir, exist_ok=True)
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=destination_dir,
-            prefix=os.path.basename(destination) + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = temp_file.name
-        shutil.copy2(source, temp_path)
-        copied_count = validate_json_file(temp_path, f"{label} file tạm")
-        if copied_count != expected_count:
-            raise RuntimeError(
-                f"{label} thay đổi số lượng khi copy: {expected_count} -> {copied_count}"
-            )
-        os.replace(temp_path, destination)
-        temp_path = None
-        return copied_count
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+def atomic_copy_json(source, destination, label="JSON", *,
+                     expected_destination=_CURRENT_VERSION, expected_source=_CURRENT_VERSION,
+                     backup=False):
+    """Copy one coherent source; CAS protects a destination edited during a step."""
+    paths = sorted({os.path.normcase(os.path.realpath(p)) for p in (source, destination)})
+    with ExitStack() as locks:
+        for path in paths:
+            locks.enter_context(database_lock(path))
+        captured = snapshot(source)
+        if captured.data is None:
+            raise RuntimeError(f"{label} nguồn không tồn tại: {source}")
+        if expected_source is not _CURRENT_VERSION and captured.version != expected_source:
+            raise RuntimeError(f"{label}: nguồn đã thay đổi sau kiểm tra; dừng, không ghi đè đích")
+        try:
+            rows = validate_bytes(captured.data)
+            if not isinstance(rows, list):
+                raise ValueError("JSON phải là List")
+        except ValueError as error:
+            raise RuntimeError(f"{label} nguồn không hợp lệ") from error
+        target = snapshot(destination)
+        authority, _ = feed_state.inspect(source, captured.version)
+        target_authority, _ = feed_state.inspect(destination, target.version)
+        if authority is not None and not feed_state.is_current(authority, target_authority):
+            raise RuntimeError(f"{label}: nguồn thuộc phiên Feed cũ hơn đích; đối chiếu trước, không ghi đè")
+        if authority is None and target_authority is not None and target.data is not None:
+            old_rows = validate_bytes(target.data)
+            old_rows = list(old_rows.values()) if isinstance(old_rows, dict) else old_rows
+            if [str(row["id"]) for row in old_rows] != [str(row["id"]) for row in rows]:
+                raise RuntimeError(f"{label}: nguồn không có mốc phiên Feed và khác thứ tự đích đã xác minh; cần hợp nhất")
+        expected = target.version if expected_destination is _CURRENT_VERSION else expected_destination
+        commit_bytes(destination, captured.data, expected,
+                     rolling_backup=str(destination) + ".pipeline.bak" if backup else None, label=label,
+                     feed_authority=authority)
+        return len(rows)
 
 
 def parse_timeout(choice):
@@ -201,6 +211,13 @@ def parse_timeout(choice):
 
 def should_resume_v4(git_count, v4_count):
     return v4_count is not None and v4_count > git_count
+
+
+def choose_collection_base(git_count, v4_count, local_edit):
+    if should_resume_v4(git_count, v4_count) and local_edit:
+        raise RuntimeError("Cả Git JSON (có sửa/hợp nhất local) và V4 (có thêm video chưa publish) đều có thay đổi. "
+                           "Không copy đè một bên; cần đối chiếu hai bản trước. Cả hai database được giữ nguyên.")
+    return "v4" if should_resume_v4(git_count, v4_count) else "git"
 
 
 def wait_until_collecting(process, run_id):
@@ -218,14 +235,8 @@ def wait_until_collecting(process, run_id):
 
 
 def manager_edit_is_current():
-    state_path = PATH_GIT_JSON + '.manager.state.json'
-    if not os.path.isfile(state_path):
-        return False
-    with open(state_path, encoding='utf-8') as file:
-        state = json.load(file)
-    with open(PATH_GIT_JSON, 'rb') as file:
-        digest = hashlib.sha256(file.read()).hexdigest()
-    return state.get('sha256') == digest
+    with database_lock(PATH_GIT_JSON):
+        return local_authority_is_current(PATH_GIT_JSON)
 
 
 def has_valid_save_receipt(run_id, minimum_count):
@@ -288,13 +299,18 @@ def main():
 
     print("\n[Bước 1] Tiến hành Backup và Copy file JSON...")
     
-    git_count_before = validate_json_file(PATH_GIT_JSON, "Git JSON hiện tại")
+    with database_lock(PATH_GIT_JSON):
+        git_count_before = validate_json_file(PATH_GIT_JSON, "Git JSON hiện tại")
+        git_version_before = snapshot(PATH_GIT_JSON).version
     print(f"   🔎 Git JSON hợp lệ: {git_count_before} videos")
 
     v4_count_before = None
+    v4_version_before = None
     if os.path.exists(PATH_V4_JSON):
         try:
-            v4_count_before = validate_json_file(PATH_V4_JSON, "V4 JSON hiện tại")
+            with database_lock(PATH_V4_JSON):
+                v4_version_before = snapshot(PATH_V4_JSON).version
+                v4_count_before = validate_json_file(PATH_V4_JSON, "V4 JSON hiện tại")
             print(f"   🔎 V4 JSON hợp lệ: {v4_count_before} videos")
         except RuntimeError as exc:
             invalid_backup = PATH_V4_JSON + datetime.now().strftime(".invalid-%Y%m%d_%H%M%S.bak")
@@ -319,14 +335,16 @@ def main():
         temp_excluded = PATH_V4_JSON + '.deleted_ids.json.tmp'
         shutil.copy2(git_excluded, temp_excluded)
         os.replace(temp_excluded, PATH_V4_JSON + '.deleted_ids.json')
-    if should_resume_v4(git_count_before, v4_count_before) and not manager_edit_is_current():
+    if choose_collection_base(git_count_before, v4_count_before, manager_edit_is_current()) == "v4":
         collection_base_count = v4_count_before
         print(
             f"   🛟 Phục hồi phiên trước: giữ V4 vì có thêm "
             f"{v4_count_before - git_count_before} videos chưa publish."
         )
     else:
-        atomic_copy_json(PATH_GIT_JSON, PATH_V4_JSON, "Git -> V4")
+        atomic_copy_json(PATH_GIT_JSON, PATH_V4_JSON, "Git -> V4",
+                         expected_destination=v4_version_before, expected_source=git_version_before,
+                         backup=True)
         collection_base_count = git_count_before
         print("   ✅ Đã copy atomic: Git JSON -> V4 JSON thành công!")
 
@@ -425,7 +443,8 @@ def main():
     # BƯỚC 3: V4 -> Git
     print("\n[Bước 3] Copy trả lại file JSON từ V4 về Git...")
     mark_step('publish_json')
-    atomic_copy_json(PATH_V4_JSON, PATH_GIT_JSON, "V4 -> Git")
+    atomic_copy_json(PATH_V4_JSON, PATH_GIT_JSON, "V4 -> Git",
+                     expected_destination=git_version_before, backup=True)
     print("   ✅ Publish atomic thành công!")
     if sync_stories:
         sync_command = [sys.executable, '-u', 'tiktok_html_generator.py', '--sync-stories', '--input', FILE_JSON]
@@ -441,7 +460,9 @@ def main():
 
     # BƯỚC 4: Chạy tiktok_thumb_manager
     print("\n[Bước 4] Đang chạy 'tiktok_thumb_manager.py' TỰ ĐỘNG...")
-    atomic_copy_json(PATH_GIT_JSON, PATH_GIT_PIPELINE, "JSON staging cho thumbnail")
+    with database_lock(PATH_GIT_JSON):
+        thumb_base_version = snapshot(PATH_GIT_JSON).version
+        atomic_copy_json(PATH_GIT_JSON, PATH_GIT_PIPELINE, "JSON staging cho thumbnail", backup=True)
     cmd_thumb = [
         sys.executable, "tiktok_thumb_manager.py",
         "--auto",                                  # Cờ báo hiệu tự chạy tự đóng
@@ -449,6 +470,7 @@ def main():
         "--output", FILE_JSON_PIPELINE,
         "--thumb-dir", "thumbs_pe.siro_phan"   # Tên thư mục bạn muốn lưu ảnh
     ]
+    thumbnail_published = False
     try:
         run_logged_step('thumbnail', cmd_thumb, DIR_GIT)
         pipeline_count = validate_json_file(PATH_GIT_PIPELINE, "JSON sau thumbnail manager")
@@ -456,13 +478,17 @@ def main():
             raise RuntimeError(
                 f"Thumbnail manager làm giảm database {v4_count} -> {pipeline_count}"
             )
-        atomic_copy_json(PATH_GIT_PIPELINE, PATH_GIT_JSON, "Thumbnail staging -> Git")
+        atomic_copy_json(PATH_GIT_PIPELINE, PATH_GIT_JSON, "Thumbnail staging -> Git",
+                         expected_destination=thumb_base_version, backup=True)
+        thumbnail_published = True
     finally:
-        if os.path.exists(PATH_GIT_PIPELINE):
+        if thumbnail_published and os.path.exists(PATH_GIT_PIPELINE):
             try:
                 os.remove(PATH_GIT_PIPELINE)
             except OSError as exc:
                 print(f"   ⚠️ Không xóa được file staging: {exc}")
+        elif os.path.exists(PATH_GIT_PIPELINE):
+            print(f"   🛟 Chưa publish; giữ nguyên staging để phục hồi: {PATH_GIT_PIPELINE}")
     print("   ✅ Xong Bước 4!")
 
     # BƯỚC 5: Chạy tiktok_html_generator
@@ -487,16 +513,21 @@ def main():
 if __name__ == "__main__":
     run_log_path, run_log_file, original_stdout, original_stderr = setup_run_logging()
     exit_code = 0
+    pipeline_owned = False
     try:
         print(f"📝 Run log: {run_log_path}")
-        main()
+        with database_lock(PIPELINE_STATUS_PATH + ".run", timeout=.1):
+            pipeline_owned = True
+            main()
     except KeyboardInterrupt:
         exit_code = 130
-        mark_step(CURRENT_STEP, 'interrupted')
+        if pipeline_owned:
+            mark_step(CURRENT_STEP, 'interrupted')
         print("\n❌ QUY TRÌNH BỊ NGẮT TRƯỚC KHI COLLECTOR SẴN SÀNG.")
     except Exception as exc:
         exit_code = 1
-        mark_step(CURRENT_STEP, 'failed', error=str(exc))
+        if pipeline_owned:
+            mark_step(CURRENT_STEP, 'failed', error=str(exc))
         print(f"\n❌ QUY TRÌNH DỪNG AN TOÀN: {exc}")
         traceback.print_exc()
     finally:

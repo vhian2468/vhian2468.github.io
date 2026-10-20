@@ -22,6 +22,8 @@
 !/tiktok_feed_types.py
 !/tiktok_story_sync.py
 !/tiktok_manual_edits.py
+!/tiktok_database_guard.py
+!/tiktok_feed_authority.py
 !/manual_edit/
 
 # Backups, duplicate copies, logs and runtime state.
@@ -40,4 +42,6 @@
 manual-edits-*.json
 .env*
 __pycache__/
+.repost-recovery/
+*.writer.lock
 *.pyc

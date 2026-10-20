@@ -10,6 +10,7 @@ from datetime import datetime, date
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
+from tiktok_database_guard import database_lock
 
 FIELDS = ('repost_date', 'repost_caption')
 ASSETS = Path(__file__).parent / 'manual_edit'
@@ -136,6 +137,11 @@ def apply_annotations(data, records, ledger=None, force=False, remote=False):
 
 
 def import_records(database_path, document, force=False, remote=False):
+    with database_lock(database_path):
+        return _import_records_locked(database_path, document, force, remote)
+
+
+def _import_records_locked(database_path, document, force=False, remote=False):
     path = Path(database_path)
     profile = profile_for(path)
     if document.get('profile') != profile:

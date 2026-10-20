@@ -7,6 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import argparse # THÊM THƯ VIỆN ĐỂ NHẬN THAM SỐ
+from tiktok_database_guard import snapshot, validate_bytes, commit_json
 
 # Thử import Pillow để xử lý ảnh
 try:
@@ -123,6 +124,7 @@ class ThumbDownloaderApp:
         self.root = root
         self.auto_run = auto_run
         self.auto_out_path = out_path
+        self.exit_code = 0
         
         self.root.title("TikTok Thumb Manager (Smart Skip)")
         self.root.geometry("650x550")
@@ -221,8 +223,14 @@ class ThumbDownloaderApp:
             self.status_var.set("Đang đọc dữ liệu...")
             self.log(f"Đọc file: {os.path.basename(input_file)}")
             
-            with open(input_file, 'r', encoding='utf-8') as f:
-                raw_data = json.load(f)
+            loaded = snapshot(input_file)
+            if loaded.data is None:
+                raise FileNotFoundError(input_file)
+            raw_data = validate_bytes(loaded.data)
+            self.loaded_input = loaded
+            if self.auto_out_path:
+                same_path = os.path.normcase(os.path.realpath(self.auto_out_path)) == os.path.normcase(str(loaded.path))
+                self.output_version = loaded.version if same_path else snapshot(self.auto_out_path).version
 
             data_map = {}
             if isinstance(raw_data, list):
@@ -306,6 +314,7 @@ class ThumbDownloaderApp:
                 self.root.after(0, lambda m=data_map, d=default_out: self.save_file_dialog(m, d))
 
         except Exception as e:
+            self.exit_code = 1
             self.log(f"Lỗi: {e}")
             self.status_var.set("Có lỗi xảy ra!")
             self.toggle_ui(True)
@@ -327,20 +336,33 @@ class ThumbDownloaderApp:
                 title="Lưu file JSON kết quả"
             )
         
+        saved = False
         if out_path:
             try:
                 save_data_list = list(data_map.values())
-                with open(out_path, 'w', encoding='utf-8') as f:
-                    json.dump(save_data_list, f, indent=4, ensure_ascii=False)
+                same_path = os.path.normcase(os.path.realpath(out_path)) == os.path.normcase(str(self.loaded_input.path))
+                expected = (self.loaded_input.version if same_path else self.output_version
+                            if self.auto_run and self.auto_out_path else snapshot(out_path).version)
+                committed = commit_json(out_path, save_data_list, expected,
+                                        rolling_backup=out_path + ".thumbnail.bak", label="thumbnail")
+                if same_path:
+                    self.loaded_input = committed
+                if self.auto_run:
+                    self.output_version = committed.version
+                saved = True
                 
                 if not self.auto_run:
                     messagebox.showinfo("Thành công", f"Đã lưu file tại:\n{out_path}")
                 self.log(f"Đã lưu JSON: {out_path}")
             except Exception as e:
+                self.exit_code = 1
+                self.log(f"Không lưu JSON; giữ dữ liệu gốc: {e}")
                 if not self.auto_run:
                     messagebox.showerror("Lỗi lưu file", str(e))
         
-        self.status_var.set("Hoàn thành!")
+        if not saved and self.auto_run:
+            self.exit_code = 1
+        self.status_var.set("Hoàn thành!" if saved else "Chưa lưu; xem lỗi / bản phục hồi.")
         self.toggle_ui(True)
         
         # NẾU CÓ CỜ AUTO -> TỰ ĐÓNG APP SAU KHI LƯU XONG
@@ -367,3 +389,4 @@ if __name__ == "__main__":
         force=args.force
     )
     root.mainloop()
+    raise SystemExit(app.exit_code)

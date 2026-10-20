@@ -17,6 +17,7 @@ import calendar
 import uuid
 import threading
 import sys
+from tiktok_database_guard import database_lock, snapshot, commit_json
 from tiktok_manual_edits import inject_editor, import_records, pull_annotations, reapply_saved_annotations, saved_gas_url, save_gas_url
 from tiktok_story_sync import current_username, read_stories, sync_story_items
 from tiktok_feed_types import source_label, recover_sources, arrange_stories, source_metadata, latest_source_patches, infer_source_patches
@@ -37,6 +38,11 @@ def apply_source_overlay(data, input_path):
 
 
 def sync_story_database(input_path, allow_deleted=False):
+    with database_lock(input_path):
+        return _sync_story_database_locked(input_path, allow_deleted)
+
+
+def _sync_story_database_locked(input_path, allow_deleted=False):
     with open(input_path, 'rb') as file:
         original = file.read()
     raw = json.loads(original.decode('utf-8-sig'))
@@ -1268,8 +1274,10 @@ class TikTokManagerApp:
     def load_path(self, filename, notify=True):
         
         try:
-            with open(filename, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
+            loaded = snapshot(filename)
+            if loaded.data is None:
+                raise FileNotFoundError(filename)
+            raw_data = json.loads(loaded.data.decode("utf-8-sig"))
             
             # --- TỰ ĐỘNG CHUẨN HÓA SANG LIST ---
             if isinstance(raw_data, dict):
@@ -1296,6 +1304,7 @@ class TikTokManagerApp:
                 self.username = "unknown"
                 
             self.current_file = filename
+            self.loaded_version = loaded.version
             self.lbl_file.config(text=f"User: {self.username} | {len(self.data_list)} videos")
             
             # Sort mặc định
@@ -1479,8 +1488,8 @@ class TikTokManagerApp:
             self.data[item['id']]['repost_order'] = idx + 1
             
         self.refresh_tree()
-        self.save_json_file()
-        messagebox.showinfo("Thành công", f"Đã cập nhật thứ tự cho {len(sorted_items)} video!")
+        if self.save_json_file():
+            messagebox.showinfo("Thành công", f"Đã cập nhật thứ tự cho {len(sorted_items)} video!")
     
     def auto_fill_repost_dates(self):
         """
@@ -1532,8 +1541,8 @@ class TikTokManagerApp:
         if updates_count > 0:
             self.arrange_current_feed()
             self.refresh_tree()
-            self.save_json_file()
-            messagebox.showinfo("Hoàn tất", f"Đã tự động điền ngày cho {updates_count} video!")
+            if self.save_json_file():
+                messagebox.showinfo("Hoàn tất", f"Đã tự động điền ngày cho {updates_count} video!")
         else:
             messagebox.showinfo("Thông báo", "Không tìm thấy khoảng trống nào giữa 2 video cùng ngày để điền.")
 
@@ -1572,10 +1581,14 @@ class TikTokManagerApp:
             ids = [v['id'] for v in save_data]
             if len(ids) != len(set(ids)):
                 raise ValueError('Database có ID trùng; không ghi file')
-            atomic_write(self.current_file, json.dumps(save_data, ensure_ascii=False, indent=2), backup=True)
-            with open(self.current_file, 'rb') as file:
-                digest = hashlib.sha256(file.read()).hexdigest()
-            atomic_write(self.current_file + '.manager.state.json', json.dumps({'sha256': digest, 'edited_at': datetime.now().isoformat()}))
+            if not hasattr(self, 'loaded_version'):
+                raise ValueError('Cần mở lại database để xác minh phiên bản trước khi lưu')
+            with database_lock(self.current_file):
+                committed = commit_json(self.current_file, save_data, self.loaded_version,
+                                        rolling_backup=self.current_file + '.manager.bak', label='manager')
+                self.loaded_version = committed.version
+                atomic_write(self.current_file + '.manager.state.json', json.dumps(
+                    {'sha256': committed.version, 'edited_at': datetime.now().isoformat()}))
             return True
                 
             # print("Saved as LIST format.") # Debug
