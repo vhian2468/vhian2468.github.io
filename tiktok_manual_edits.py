@@ -10,7 +10,8 @@ from datetime import datetime, date
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
-from tiktok_database_guard import database_lock
+from tiktok_database_guard import database_lock, commit_json
+from tiktok_manual_queue import pending_fields
 
 FIELDS = ('repost_date', 'repost_caption')
 ASSETS = Path(__file__).parent / 'manual_edit'
@@ -154,7 +155,29 @@ def _import_records_locked(database_path, document, force=False, remote=False):
     data = list(raw.values()) if isinstance(raw, dict) else raw
     ledger_path = Path(str(path)+'.manual_edits.json')
     saved = json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else {}
-    updated, ledger, report = apply_annotations(data, records, saved.get('items', {}), force, remote)
+    protected = pending_fields(path)
+    filtered, queued_conflicts = [], []
+    local = {str(v['id']): v for v in data}
+    for record in records:
+        identifier = str(record['video_id'])
+        patch = record.get('fields', record.get('patch', {}))
+        validate_patch(patch)
+        allowed = {}
+        for key, value in patch.items():
+            pending = protected.get((identifier, key))
+            if pending:
+                queued_conflicts.append(dict(video_id=identifier, field=key,
+                    local=local.get(identifier, {}).get(key, ''), remote=value,
+                    pending_value=pending['value'], pending_op_id=pending['op_id'],
+                    reason='PC manual queue not acknowledged'))
+            else:
+                allowed[key] = value
+        if allowed:
+            item = copy.deepcopy(record)
+            item['fields'] = allowed
+            filtered.append(item)
+    updated, ledger, report = apply_annotations(data, filtered, saved.get('items', {}), force, remote)
+    report['conflicts'] = queued_conflicts + report['conflicts']
     if path.read_bytes() != original:
         raise RuntimeError('Database thay đổi khi đang nhập; không ghi đè')
     backup = None
@@ -166,14 +189,17 @@ def _import_records_locked(database_path, document, force=False, remote=False):
             os.fsync(file.fileno())
     # Commit database before ledger, so an interrupted import can safely replay.
     if updated != data:
-        atomic_json(path, updated)
-    atomic_json(ledger_path, {'version':1,'profile':profile,'items':ledger})
+        commit_json(path, updated, hashlib.sha256(original).hexdigest(), label='manual-import')
+    next_ledger = {'version':1,'profile':profile,'items':ledger}
+    if saved != next_ledger:
+        atomic_json(ledger_path, next_ledger)
     conflict_path = Path(str(path)+'.manual_edits.conflicts.json')
     old_conflicts = json.loads(conflict_path.read_text(encoding='utf-8')) if conflict_path.exists() else []
     addressed = {(str(r['video_id']), key) for r in records for key in r.get('fields', r.get('patch', {}))}
     pending = [c for c in old_conflicts if (c['video_id'],c['field']) not in addressed]
     report['conflicts'] = pending + report['conflicts']
-    atomic_json(conflict_path, report['conflicts'])
+    if not conflict_path.exists() or old_conflicts != report['conflicts']:
+        atomic_json(conflict_path, report['conflicts'])
     if updated != data:
         atomic_json(str(path)+'.manager.state.json', {'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'edited_at':datetime.now().isoformat()})
     report['backup'] = backup

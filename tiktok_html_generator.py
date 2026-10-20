@@ -1,4 +1,11 @@
 import tkinter as tk
+from tiktok_manual_queue import commit_manager_json, status_title
+from tiktok_manual_upload import push as push_pc_manual
+from tiktok_manager_refresh import ManagerRefresh
+import tiktok_manual_rebase as form_rebase
+from tiktok_manual_queue_view import show as show_manual_queue
+from tiktok_hub_times import Display as HubTimeDisplay
+from tiktok_manual_edits import profile_for
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import json
 import os
@@ -17,8 +24,9 @@ import calendar
 import uuid
 import threading
 import sys
+import subprocess
 from tiktok_database_guard import database_lock, snapshot, commit_json
-from tiktok_manual_edits import inject_editor, import_records, pull_annotations, reapply_saved_annotations, saved_gas_url, save_gas_url
+from tiktok_manual_edits import inject_editor, import_records, pull_annotations, reapply_saved_annotations, saved_gas_url, save_gas_url, gas_request, validate_gas_url
 from tiktok_story_sync import current_username, read_stories, sync_story_items
 from tiktok_feed_types import source_label, recover_sources, arrange_stories, source_metadata, latest_source_patches, infer_source_patches
 
@@ -910,8 +918,17 @@ class TikTokManagerApp:
         manual_row = tk.Frame(self.left_frame)
         manual_row.pack(anchor='w', padx=5, pady=3)
         tk.Button(manual_row, text='Nhận ngày/caption từ GAS', command=self.pull_manual_edits).pack(side='left')
+        tk.Button(manual_row, text='Gửi ngày/caption PC lên GAS', command=lambda: self.pull_manual_edits(send_only=True)).pack(side='left')
         tk.Button(manual_row, text='Nhập backup chỉnh sửa HTML', command=self.import_manual_backup).pack(side='left', padx=5)
         tk.Button(self.left_frame, text='Cài URL API (GAS) cho HTML', command=self.configure_manual_url).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text='Xem hàng chờ / xung đột ngày và caption',
+                  command=lambda: show_manual_queue(self.root, self.current_file) if self.current_file
+                  else messagebox.showinfo('Chọn database', 'Chọn file JSON trước.')).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text='Giờ / nhãn / ghi chú Hub (cửa sổ riêng)',
+                  command=self.open_hub_manual).pack(anchor='w', padx=5, pady=3)
+        self.hub_time_display = HubTimeDisplay(r'D:\tiktok\tiktok-repost\V4-2026\mobile_capture\private_hub\main-journal.sqlite')
+        self.lbl_hub_time = tk.Label(self.left_frame, text='Giờ Hub local · chỉ hiển thị riêng tư')
+        self.lbl_hub_time.pack(anchor='w', padx=5)
         
         # Search Bar (Fixed: No 'placeholder' arg)
         self.search_var = tk.StringVar()
@@ -922,7 +939,9 @@ class TikTokManagerApp:
         tk.Entry(self.left_frame, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
         
         # Treeview (List)
-        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption", "source_type"), show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption", "source_type", "hub_time"), show="headings", selectmode="extended")
+        self.tree.heading("hub_time", text="Giờ repost Hub (+07) · riêng tư")
+        self.tree.column("hub_time", width=350)
         self.tree.heading("source_type", text="Loại / Nguồn API")
         self.tree.column("source_type", width=180)
         self.tree.heading("feed_index", text="#")
@@ -995,6 +1014,24 @@ class TikTokManagerApp:
         self.btn_open_web.pack(fill="x")
 
         self.selected_vid = None
+        self.sync_refresh = ManagerRefresh()
+        self.root.after(5000, self.check_external_update)
+
+    def check_external_update(self):
+        try:
+            opened = bool(self.root.grab_current()) or any(
+                isinstance(widget, tk.Toplevel) and widget.winfo_exists()
+                for widget in self.root.winfo_children())
+            state = self.sync_refresh.poll(self, dialog_open=opened)
+            self.refresh_hub_times()
+            if state == 'pending':
+                self.lbl_file.config(text='Có dữ liệu mới từ đồng bộ · giữ phần đang nhập; lưu/đối chiếu trước khi tải lại')
+            elif state == 'refreshed':
+                self.lbl_file.config(text=f'Đã nhận bản mới · User: {self.username} | {len(self.data_list)} videos')
+        except Exception:
+            self.lbl_file.config(text='Chưa đọc được bản mới · giữ nguyên dữ liệu và nội dung đang nhập')
+        finally:
+            self.root.after(5000, self.check_external_update)
 
     def import_reposts(self):
         if not self.current_file:
@@ -1107,7 +1144,31 @@ class TikTokManagerApp:
         except Exception as error:
             messagebox.showerror('Không lưu được URL API', str(error))
 
-    def pull_manual_edits(self):
+    def refresh_hub_times(self):
+        if not self.current_file:
+            return
+        if self.hub_time_display.refresh(profile_for(self.current_file)):
+            # Update cells only: never reload a form or replace an unsaved draft.
+            for item in self.tree.get_children():
+                video = self.tree.item(item, 'tags')[0]
+                self.tree.set(item, 'hub_time', self.hub_time_display.values.get(video, ''))
+        self.lbl_hub_time.config(text=self.hub_time_display.status)
+
+    def open_hub_manual(self):
+        script = r'D:\tiktok\tiktok-repost\V4-2026\mobile_capture\manual_view.py'
+        if not os.path.isfile(script):
+            script = filedialog.askopenfilename(parent=self.root, title='Chọn manual_view.py của Hub PC',
+                                                filetypes=[('Python', '*.py')])
+        if not script:
+            return
+        try:
+            # Separate process keeps Hub module imports and journal paths isolated.
+            subprocess.Popen([sys.executable, '-B', script], cwd=os.path.dirname(script))
+        except OSError:
+            messagebox.showerror('Không mở được Hub', 'Kiểm tra đường dẫn Hub và Python; dữ liệu chưa bị thay đổi.',
+                                 parent=self.root)
+
+    def pull_manual_edits(self, send_only=False):
         if not self.current_file: return
         try:
             url = os.environ.get('TIKTOK_GAS_URL','') or saved_gas_url(self.username)
@@ -1116,17 +1177,24 @@ class TikTokManagerApp:
         if not url:
             url = simpledialog.askstring('GAS', 'GAS Web App URL (/exec):', parent=self.root)
         if not url: return
+        try:
+            url = validate_gas_url(url)
+        except Exception as error:
+            messagebox.showerror('URL GAS không hợp lệ', str(error)); return
         token = simpledialog.askstring('GAS', 'Token riêng (không lưu vào file):', show='*', parent=self.root)
         if not token: return
         if not self.save_json_file(): return
         # Pull remotely on a worker; disable manager edits during the merge.
         path, result = self.current_file, {}
         overlay = tk.Toplevel(self.root)
-        overlay.title('Đang nhận chỉnh sửa')
-        tk.Label(overlay, text='Đang nhận từ GAS… Có thể mất vài chục giây.\nKhông đóng manager trong lúc này.', padx=25, pady=25).pack()
+        overlay.title('Đang gửi chỉnh sửa PC' if send_only else 'Đang nhận chỉnh sửa')
+        tk.Label(overlay, text=('Đang gửi hàng chờ PC lên GAS…' if send_only else 'Đang nhận từ GAS…') +
+                 '\nCó thể mất vài chục giây. Không đóng manager trong lúc này.', padx=25, pady=25).pack()
         overlay.transient(self.root); overlay.grab_set(); overlay.protocol('WM_DELETE_WINDOW', lambda: None)
         def work():
-            try: result['report'] = pull_annotations(path, url, token)
+            try:
+                result['report'] = (push_pc_manual(path, url, lambda request: gas_request(url, token, request))
+                                    if send_only else pull_annotations(path, url, token))
             except Exception as error: result['error'] = str(error)
         worker = threading.Thread(target=work, daemon=True)
         worker.start()
@@ -1134,6 +1202,14 @@ class TikTokManagerApp:
             if worker.is_alive(): self.root.after(150, poll); return
             overlay.grab_release(); overlay.destroy()
             if 'error' in result: messagebox.showerror('GAS chưa đồng bộ', result['error'])
+            elif send_only:
+                report = result['report']
+                self.root.title(status_title(path))
+                messagebox.showinfo('Kết quả gửi chỉnh sửa PC',
+                    f"GAS xác nhận {report['acked']} thao tác trong lượt này.\n"
+                    f"Còn {report['remaining']} lần lưu trong hàng chờ; {report['blocked']} video cần đối chiếu.\n"
+                    "Không xóa lịch sử, không thay Feed hoặc dữ liệu JSON local.\n"
+                    "Nếu còn hàng chờ không xung đột, bấm Gửi lần nữa để tiếp tục.")
             else: self.manual_report(result['report'])
         self.root.after(150, poll)
 
@@ -1271,7 +1347,7 @@ class TikTokManagerApp:
         except Exception as error:
             messagebox.showerror('Không đồng bộ được story', str(error))
 
-    def load_path(self, filename, notify=True):
+    def load_path(self, filename, notify=True, silent_errors=False):
         
         try:
             loaded = snapshot(filename)
@@ -1304,6 +1380,8 @@ class TikTokManagerApp:
                 self.username = "unknown"
                 
             self.current_file = filename
+            if hasattr(self, 'hub_time_display'):
+                self.hub_time_display.refresh(profile_for(filename))
             self.loaded_version = loaded.version
             self.lbl_file.config(text=f"User: {self.username} | {len(self.data_list)} videos")
             
@@ -1313,11 +1391,16 @@ class TikTokManagerApp:
             self.selected_vid = None
             
             self.refresh_tree()
+            if hasattr(self, 'sync_refresh'):
+                self.sync_refresh.reset(self)
             if notify:
                 messagebox.showinfo("OK", "Đã tải dữ liệu thành công! (Tự động convert về List)")
+            return True
             
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Không đọc được file: {e}")
+            if not silent_errors:
+                messagebox.showerror("Lỗi", f"Không đọc được file: {e}")
+            return False
 
     def refresh_tree(self):
         # Clear tree
@@ -1350,7 +1433,8 @@ class TikTokManagerApp:
                 v.get('repost_date', ''),
                 v.get('repost_order', ''),
                 v.get('repost_caption', ''),
-                source_label(v)
+                source_label(v),
+                self.hub_time_display.values.get(v['id'], '') if hasattr(self, 'hub_time_display') else ''
             ), tags=(v['id'],))
 
     def on_search(self, *args):
@@ -1366,6 +1450,8 @@ class TikTokManagerApp:
         
         v = self.data.get(item_id)
         if not v: return
+        self.edit_opening = {key: str(v.get(key, '') or '') for key in form_rebase.FIELDS}
+        self.edit_opening_id = item_id
         
         # Fill Form
         self.lbl_info.config(text=f"ID: {v['id']}\nNick: {v['nickname']}\nDate: {v['date']}\nDesc: {v['desc'][:50]}...")
@@ -1446,13 +1532,53 @@ class TikTokManagerApp:
         draw()
         popup.grab_set()
 
+    def reconcile_external_form(self):
+        if snapshot(self.current_file).version == self.loaded_version:
+            return False
+        from tiktok_manager_refresh import model_hash
+        if (not hasattr(self, 'sync_refresh') or
+                model_hash(self.data_list) != self.sync_refresh.baseline):
+            messagebox.showwarning('Giữ thay đổi chưa lưu',
+                'File và dữ liệu trong bộ nhớ đều đã đổi. Không tự thay thế.\n'
+                'Không đóng manager khi chưa giữ lại phần đang sửa.\n'
+                'Nếu lần lưu trước đã tạo bản .repost-recovery, giữ bản đó để đối chiếu.')
+            return True
+        try:
+            if getattr(self, 'edit_opening_id', None) != self.selected_vid:
+                raise ValueError('Thiếu bản gốc lúc mở video; giữ phần đang nhập để đối chiếu.')
+            values = {key: entry.get().strip() for key, entry in self.extra_entries.items()}
+            values.update(repost_date=self.entry_repost_date.get().strip(),
+                          repost_caption=self.entry_repost_cap.get().strip())
+            plan = form_rebase.prepare(self.current_file, self.selected_vid, self.edit_opening, values)
+            choices = {}
+            for field, versions in plan['conflicts'].items():
+                choice = form_rebase.choose_conflict(self.root, field, versions)
+                if choice is None:
+                    return True
+                choices[field] = choice
+            selected = self.selected_vid
+            form_rebase.commit(plan, choices)
+            self.load_path(self.current_file, notify=False)
+            for row in self.tree.get_children():
+                if self.tree.item(row, 'tags')[0] == selected:
+                    self.tree.selection_set(row)
+                    self.on_select_item(None)
+                    break
+        except Exception as error:
+            messagebox.showerror('Chưa lưu phần đối chiếu', str(error))
+        return True
+
     def save_current_item(self):
         if not self.selected_vid or self.selected_vid not in self.data: return
+        if self.reconcile_external_form(): return
         
         v = self.data[self.selected_vid]
-        v['repost_date'] = self.entry_repost_date.get().strip()
-        v['repost_caption'] = self.entry_repost_cap.get().strip()
         manual_fields = set(v.get('manual_fields', []))
+        for key, value in (('repost_date', self.entry_repost_date.get().strip()),
+                           ('repost_caption', self.entry_repost_cap.get().strip())):
+            if str(v.get(key, '') or '') != value:
+                manual_fields.add(key)
+            v[key] = value
         for key, entry in self.extra_entries.items():
             value = entry.get().strip()
             if str(v.get(key, '')) != value:
@@ -1464,7 +1590,12 @@ class TikTokManagerApp:
         
         # Update UI List
         self.refresh_tree()
-        self.save_json_file()
+        if self.save_json_file():
+            # A subsequent rebase starts from this successful save, not from
+            # the values shown when the video was selected several edits ago.
+            self.edit_opening = {key: str(v.get(key, '') or '') for key in
+                                 ('repost_date', 'repost_caption', *self.extra_entries)}
+            self.edit_opening_id = self.selected_vid
 
     def open_in_browser(self):
         if not self.selected_vid: return
@@ -1532,10 +1663,12 @@ class TikTokManagerApp:
                     # Chỉ điền nếu chưa có ngày (hoặc ghi đè luôn để đảm bảo đồng bộ - ở đây chọn ghi đè)
                     if self.data_list[k].get('repost_date') != date_start:
                         self.data_list[k]['repost_date'] = date_start
+                        self.data_list[k]['manual_fields'] = sorted(set(self.data_list[k].get('manual_fields', [])) | {'repost_date'})
                         # Cập nhật cả vào self.data map
                         vid_id = self.data_list[k]['id']
                         if vid_id in self.data:
                             self.data[vid_id]['repost_date'] = date_start
+                            self.data[vid_id]['manual_fields'] = sorted(set(self.data[vid_id].get('manual_fields', [])) | {'repost_date'})
                         updates_count += 1
 
         if updates_count > 0:
@@ -1584,9 +1717,13 @@ class TikTokManagerApp:
             if not hasattr(self, 'loaded_version'):
                 raise ValueError('Cần mở lại database để xác minh phiên bản trước khi lưu')
             with database_lock(self.current_file):
-                committed = commit_json(self.current_file, save_data, self.loaded_version,
+                committed = commit_manager_json(self.current_file, save_data, self.loaded_version,
                                         rolling_backup=self.current_file + '.manager.bak', label='manager')
                 self.loaded_version = committed.version
+                if hasattr(self, 'sync_refresh'):
+                    self.sync_refresh.reset(self)
+                if hasattr(self, 'root'):
+                    self.root.title(status_title(self.current_file))
                 atomic_write(self.current_file + '.manager.state.json', json.dumps(
                     {'sha256': committed.version, 'edited_at': datetime.now().isoformat()}))
             return True
