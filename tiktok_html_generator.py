@@ -917,6 +917,11 @@ class TikTokManagerApp:
         tk.Button(self.left_frame, text="Đồng bộ story của user hiện tại từ tiktok-story", command=self.sync_current_user_stories).pack(anchor='w', padx=5, pady=3)
         manual_row = tk.Frame(self.left_frame)
         manual_row.pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text='↔ Đồng bộ ngày/caption hai chiều', command=lambda: self.pull_manual_edits(two_way=True)).pack(anchor='w', padx=5, pady=3)
+        tk.Button(self.left_frame, text='▶ / ■ Tự đồng bộ ngày/caption', command=self.toggle_manual_sync).pack(anchor='w', padx=5, pady=3)
+        self.manual_sync_status = tk.Label(self.left_frame, text='Tự đồng bộ: tắt · chỉ gửi chỉnh sửa đã lưu', wraplength=300, justify='left')
+        self.manual_sync_status.pack(anchor='w', padx=5)
+        self.root.bind('<Destroy>', self.stop_manual_sync_on_close, add='+')
         tk.Button(manual_row, text='Nhận ngày/caption từ GAS', command=self.pull_manual_edits).pack(side='left')
         tk.Button(manual_row, text='Gửi ngày/caption PC lên GAS', command=lambda: self.pull_manual_edits(send_only=True)).pack(side='left')
         tk.Button(manual_row, text='Nhập backup chỉnh sửa HTML', command=self.import_manual_backup).pack(side='left', padx=5)
@@ -1019,6 +1024,11 @@ class TikTokManagerApp:
 
     def check_external_update(self):
         try:
+            session = getattr(self, 'manual_sync_session', None)
+            if session:
+                message = session.poll(self.current_file)
+                if message:
+                    self.manual_sync_status.config(text=message)
             opened = bool(self.root.grab_current()) or any(
                 isinstance(widget, tk.Toplevel) and widget.winfo_exists()
                 for widget in self.root.winfo_children())
@@ -1168,8 +1178,26 @@ class TikTokManagerApp:
             messagebox.showerror('Không mở được Hub', 'Kiểm tra đường dẫn Hub và Python; dữ liệu chưa bị thay đổi.',
                                  parent=self.root)
 
-    def pull_manual_edits(self, send_only=False):
+    def stop_manual_sync_on_close(self, event):
+        if event.widget == self.root:
+            session = getattr(self, 'manual_sync_session', None)
+            if session:
+                session.stop()
+
+    def toggle_manual_sync(self):
+        session = getattr(self, 'manual_sync_session', None)
+        if session and session.running:
+            session.stop()
+            self.manual_sync_status.config(text='Đang dừng sau lượt hiện tại; giữ hàng chờ.')
+            return
+        self.pull_manual_edits(auto_start=True)
+
+    def pull_manual_edits(self, send_only=False, two_way=False, auto_start=False):
         if not self.current_file: return
+        session = getattr(self, 'manual_sync_session', None)
+        if session and session.running:
+            messagebox.showinfo('Đang đồng bộ tự động', 'Phiên tự động đang gửi–nhận. Dừng phiên và chờ hoàn tất trước khi chạy riêng.')
+            return
         try:
             url = os.environ.get('TIKTOK_GAS_URL','') or saved_gas_url(self.username)
         except Exception as error:
@@ -1184,15 +1212,24 @@ class TikTokManagerApp:
         token = simpledialog.askstring('GAS', 'Token riêng (không lưu vào file):', show='*', parent=self.root)
         if not token: return
         if not self.save_json_file(): return
+        if auto_start:
+            from tiktok_manual_background import Session
+            self.manual_sync_session = Session(self.current_file, url, token)
+            self.manual_sync_status.config(text='Đang tự đồng bộ ngày/caption đã lưu · token chỉ giữ trong phiên · giờ/media dùng Hub riêng.')
+            return
         # Pull remotely on a worker; disable manager edits during the merge.
         path, result = self.current_file, {}
         overlay = tk.Toplevel(self.root)
-        overlay.title('Đang gửi chỉnh sửa PC' if send_only else 'Đang nhận chỉnh sửa')
-        tk.Label(overlay, text=('Đang gửi hàng chờ PC lên GAS…' if send_only else 'Đang nhận từ GAS…') +
+        overlay.title('Đồng bộ hai chiều' if two_way else 'Đang gửi chỉnh sửa PC' if send_only else 'Đang nhận chỉnh sửa')
+        tk.Label(overlay, text=('Đang gửi ngày/caption PC rồi nhận từ GAS…' if two_way else 'Đang gửi hàng chờ PC lên GAS…' if send_only else 'Đang nhận từ GAS…') +
                  '\nCó thể mất vài chục giây. Không đóng manager trong lúc này.', padx=25, pady=25).pack()
         overlay.transient(self.root); overlay.grab_set(); overlay.protocol('WM_DELETE_WINDOW', lambda: None)
         def work():
             try:
+                if two_way:
+                    from tiktok_manual_sync import cycle
+                    result['report'] = cycle(path, url, token)
+                    return
                 result['report'] = (push_pc_manual(path, url, lambda request: gas_request(url, token, request))
                                     if send_only else pull_annotations(path, url, token))
             except Exception as error: result['error'] = str(error)
@@ -1202,6 +1239,15 @@ class TikTokManagerApp:
             if worker.is_alive(): self.root.after(150, poll); return
             overlay.grab_release(); overlay.destroy()
             if 'error' in result: messagebox.showerror('GAS chưa đồng bộ', result['error'])
+            elif two_way:
+                report = result['report']
+                self.load_path(path, notify=False)
+                messagebox.showinfo('Đồng bộ ngày/caption',
+                    f"GAS xác nhận {report['acked']} thao tác · nhận {report['received_fields']} trường.\n"
+                    f"Còn {report['remaining']} lần lưu chờ gửi · {report['blocked']} video gửi cần đối chiếu.\n"
+                    f"Xung đột nhận: {report['conflicts']} · ID chưa có ở PC: {report['missing_ids']}.\n"
+                    "Nếu còn hàng chờ, bấm đồng bộ tiếp. Giữ nguyên dữ liệu xung đột và lịch sử.\n"
+                    "Chỉ ngày/caption; giờ, nhãn và media dùng Hub riêng. Không tự xuất GitHub.")
             elif send_only:
                 report = result['report']
                 self.root.title(status_title(path))
