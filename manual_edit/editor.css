@@ -11,6 +11,7 @@ body.manual-edit-mode .manual-edit-button { display:block; }
 .manual-row { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
 #manualSyncStatus { font-size:.8rem; color:#b4cee9; padding:6px 0; white-space:normal; }
 #manualConflict { color:#ffd278; }
+.manual-private-status { color:#f4d96a; font-size:.82rem; align-self:center; }
 .manual-dialog .manual-remember { display:flex; align-items:center; gap:8px; }
 .manual-dialog .manual-remember input { width:auto; margin:0; }
 #manualConflictActions[hidden] { display:none; }

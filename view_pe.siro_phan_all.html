@@ -99,7 +99,7 @@
             .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
             
             /* CARD DESIGN UPDATED */
-            .card { background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid #333; position: relative; display: flex; flex-direction: column; transition: 0.2s; }
+            .card { background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid #333; position: relative; display: flex; flex-direction: column; transition: 0.2s; content-visibility: auto; contain: layout paint style; contain-intrinsic-size: auto 560px; }
             .card:hover { transform: translateY(-3px); border-color: #666; }
             
             /* REPOST HIGHLIGHT */
@@ -117,8 +117,11 @@
             
             /* DATE STYLES */
             .date-repost { color: var(--neon-green); font-size: 0.9em; font-weight: bold; margin-bottom: 4px; display: flex; align-items: center; gap: 5px; text-shadow: 0 0 5px rgba(57,255,20,0.4); }
+            .time-repost { color: #72f7ff; font-size: 0.88em; font-weight: bold; margin: -1px 0 5px; text-shadow: 0 0 6px rgba(114,247,255,0.45); }
             .caption-repost { color: var(--neon-yellow); font-size: 0.95em; font-weight: bold; margin-bottom: 8px; font-style: italic; border-left: 2px solid var(--neon-yellow); padding-left: 8px; line-height: 1.3; }
             .date-normal { color: var(--primary); font-size: 0.85em; font-weight: normal; margin-bottom: 4px; opacity: 0.9; }
+            .public-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0; }
+            .public-tag { color: #ffee00; border: 1px solid rgba(255,238,0,.62); background: rgba(255,238,0,.08); border-radius: 999px; padding: 2px 7px; font-size: .78em; font-weight: bold; text-shadow: 0 0 5px rgba(255,238,0,.4); }
 
             .nickname { font-weight: bold; font-size: 1rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px;}
             .uid { font-size: 0.85em; color: var(--text-sub); display: block; margin-bottom: 4px; }
@@ -201,7 +204,7 @@
                     <button id="postFilter" aria-pressed="false" onclick="toggleTypeFilter('post')">Post</button>
                     <button id="storyFilter" aria-pressed="false" onclick="toggleTypeFilter('story')">Story</button>
                     <button id="repostFilter" aria-pressed="false" onclick="toggleTypeFilter('repost')">Repost</button>
-                    <button onclick="renderAll()" class="btn-danger">All</button>
+                    <button onclick="renderAll()" class="btn-danger" title="Giữ cửa sổ tối đa 240 thẻ để tránh lag">Cửa sổ</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
                 </div>
@@ -232,9 +235,15 @@
         
         let fullData = [];
         let displayData = [];
+        let searchIndex = [];
+        let fullIndexById = new Map();
+        let displayIndexById = new Map();
         let renderedStart = 0;
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
+        const MAX_RENDERED_CARDS = 240;
+        let suppressScroll = false;
+        let lastScrollTop = 0;
         let captionOnly = false;
         const selectedTypes = new Set();
         let unlocked = false;
@@ -244,7 +253,7 @@
             if (unlocking || unlocked || jumpOrderInput.value !== '2211') return;
             unlocking = true;
             const script = document.createElement('script');
-            script.src = 'data_pe.siro_phan_all.js?t=1792668423';
+            script.src = 'data_pe.siro_phan_all.js?t=1793055679';
             script.onload = () => {
                 unlocking = false;
                 if (!Array.isArray(window.tiktokData)) { alert('File dữ liệu không hợp lệ'); return; }
@@ -288,14 +297,61 @@
             return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
+        function repostTimeText(v) {
+            const value = v && v.repost_time;
+            if (!value || typeof value !== 'object') return '';
+            const compact = text => {
+                const match = String(text || '').match(/^(\d{4}-\d\d-\d\d)T(\d\d:\d\d(?::\d\d)?)(?:Z|[.+-].*)?$/);
+                return match ? {day: match[1], time: match[2]} : null;
+            };
+            if (value.kind === 'exact') {
+                const point = compact(value.at);
+                return point ? point.time : '';
+            }
+            if (value.kind === 'range') {
+                const lower = compact(value.lower), upper = compact(value.upper);
+                if (!lower || !upper) return '';
+                return lower.day === upper.day ? `${lower.time} – ${upper.time}`
+                    : `${lower.day} ${lower.time} – ${upper.day} ${upper.time}`;
+            }
+            return '';
+        }
+
+        function publicTagsHtml(v) {
+            if (!Array.isArray(v && v.tags) || !v.tags.length) return '';
+            return `<div class="public-tags">${v.tags.map(tag => `<span class="public-tag">#${escapeHtml(String(tag).replace(/^#+/, ''))}</span>`).join('')}</div>`;
+        }
+
         async function startApp() {
             if(window.tiktokManualEditor) await window.tiktokManualEditor.init(fullData);
             document.getElementById('totalCount').innerText = fullData.length;
             displayData = [...fullData];
+            fullIndexById = new Map(fullData.map((video, index) => [String(video.id), index]));
+            searchIndex = fullData.map(searchableText);
+            rebuildDisplayIndex();
             renderSidebar();
             resetRender();
             renderDown(); 
             scrollArea.addEventListener('scroll', onScroll);
+        }
+
+        function searchableText(v) {
+            return [
+                v.nickname, v.date, v.repost_date, v.repost_caption, v.desc,
+                v.uniqueId, v.id, v.music_title, v.hashtags, v.source_type,
+                v.source_types, v.source_apis, repostTimeText(v), v.tags
+            ].map(value => String(value ?? '')).join('\u0000').toLocaleLowerCase('vi');
+        }
+
+        function refreshSearchIndexForIds(ids) {
+            for (const id of ids || []) {
+                const index = fullIndexById.get(String(id));
+                if (index !== undefined) searchIndex[index] = searchableText(fullData[index]);
+            }
+        }
+
+        function rebuildDisplayIndex() {
+            displayIndexById = new Map(displayData.map((video, index) => [String(video.id), index]));
         }
 
         function toggleSidebar() {
@@ -308,6 +364,7 @@
             grid.innerHTML = '';
             renderedStart = 0;
             renderedEnd = 0;
+            lastScrollTop = 0;
         }
 
         function createCard(v) {
@@ -329,11 +386,13 @@
                 </a>
                 <div class="info">
                     ${v.repost_date ? `<div class="date-repost">♻️ ${escapeHtml(v.repost_date)}</div>` : ''}
+                    ${repostTimeText(v) ? `<div class="time-repost">🕐 ${escapeHtml(repostTimeText(v))}</div>` : ''}
                     ${v.repost_caption ? `<div class="caption-repost">💬 ${escapeHtml(v.repost_caption)}</div>` : ''}
                     <div class="date-normal">📅 Tạo: ${escapeHtml(v.date)}</div>
                     <span class="nickname">${escapeHtml(v.nickname)}</span>
                     <span class="uid">@${escapeHtml(v.uniqueId)}</span>
                     <div class="desc" title="${escapeHtml(v.desc)}">${escapeHtml(v.desc)}</div>
+                    ${publicTagsHtml(v)}
                     <div class="metrics"><span>❤️ ${escapeHtml(v.digg || 0)}</span><span>💬 ${escapeHtml(v.comment || 0)}</span><span>🔄 ${escapeHtml(v.share || 0)}</span><span>▶ ${escapeHtml(v.play || 0)}</span></div>
                     ${musicHtml}
                 </div>`;
@@ -411,22 +470,52 @@
         }
 
         function onScroll() {
+            if (suppressScroll) return;
             const st = scrollArea.scrollTop;
-            const sh = scrollArea.scrollHeight;
-            const ch = scrollArea.clientHeight;
-            if (st + ch >= sh - 600) renderDown();
-            if (st <= 200 && renderedStart > 0) renderUp();
+            const movingDown = st >= lastScrollTop;
+            lastScrollTop = st;
+            if (movingDown && st + scrollArea.clientHeight >= scrollArea.scrollHeight - 600) renderDown();
+            else if (!movingDown && st <= 200 && renderedStart > 0) renderUp();
+        }
+
+        function silenceProgrammaticScroll(callback) {
+            suppressScroll = true;
+            callback();
+            lastScrollTop = scrollArea.scrollTop;
+            requestAnimationFrame(() => {
+                lastScrollTop = scrollArea.scrollTop;
+                suppressScroll = false;
+            });
+        }
+
+        function trimRenderedTop() {
+            const excess = (renderedEnd - renderedStart) - MAX_RENDERED_CARDS;
+            if (excess <= 0) return;
+            const beforeHeight = scrollArea.scrollHeight;
+            const beforeTop = scrollArea.scrollTop;
+            for (let index = 0; index < excess && grid.firstElementChild; index++) grid.firstElementChild.remove();
+            renderedStart += excess;
+            const removedHeight = Math.max(0, beforeHeight - scrollArea.scrollHeight);
+            silenceProgrammaticScroll(() => { scrollArea.scrollTop = Math.max(0, beforeTop - removedHeight); });
+        }
+
+        function trimRenderedBottom() {
+            const excess = (renderedEnd - renderedStart) - MAX_RENDERED_CARDS;
+            if (excess <= 0) return;
+            for (let index = 0; index < excess && grid.lastElementChild; index++) grid.lastElementChild.remove();
+            renderedEnd -= excess;
         }
 
         function renderDown(forceCount = -1) {
             if (renderedEnd >= displayData.length) { loadingMsg.style.display = 'none'; return; }
-            let count = (forceCount > -1) ? forceCount : BATCH_SIZE;
-            let end = Math.min(renderedEnd + count, displayData.length);
-            const batch = displayData.slice(renderedEnd, end);
+            const requested = (forceCount > -1) ? forceCount : BATCH_SIZE;
+            const count = Math.min(Math.max(BATCH_SIZE, requested), MAX_RENDERED_CARDS);
+            const end = Math.min(renderedEnd + count, displayData.length);
             const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
+            displayData.slice(renderedEnd, end).forEach(v => fragment.appendChild(createCard(v)));
             grid.appendChild(fragment);
             renderedEnd = end;
+            trimRenderedTop();
             loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
         }
 
@@ -434,47 +523,57 @@
             if (renderedStart <= 0) return;
             const oldScrollHeight = scrollArea.scrollHeight;
             const oldScrollTop = scrollArea.scrollTop;
-            let count = BATCH_SIZE;
-            let start = Math.max(0, renderedStart - count);
-            const batch = displayData.slice(start, renderedStart);
+            const start = Math.max(0, renderedStart - BATCH_SIZE);
             const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
+            displayData.slice(start, renderedStart).forEach(v => fragment.appendChild(createCard(v)));
             grid.insertBefore(fragment, grid.firstChild);
             renderedStart = start;
-            scrollArea.scrollTop = oldScrollTop + (scrollArea.scrollHeight - oldScrollHeight);
+            silenceProgrammaticScroll(() => {
+                scrollArea.scrollTop = oldScrollTop + (scrollArea.scrollHeight - oldScrollHeight);
+            });
+            trimRenderedBottom();
+            loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
+        }
+
+        function renderWindowAroundIndex(index, highlightId = '') {
+            if (!displayData.length) return;
+            const target = Math.max(0, Math.min(displayData.length - 1, Number(index) || 0));
+            const start = Math.max(0, Math.min(target - Math.floor(MAX_RENDERED_CARDS / 3), displayData.length - MAX_RENDERED_CARDS));
+            const end = Math.min(displayData.length, start + MAX_RENDERED_CARDS);
+            const fragment = document.createDocumentFragment();
+            displayData.slice(start, end).forEach(v => fragment.appendChild(createCard(v)));
+            grid.replaceChildren(fragment);
+            renderedStart = start;
+            renderedEnd = end;
+            loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
+            requestAnimationFrame(() => {
+                const video = displayData[target];
+                const element = document.getElementById('card-' + (highlightId || video?.id || ''));
+                if (element) {
+                    silenceProgrammaticScroll(() => element.scrollIntoView({behavior:'auto', block:'center'}));
+                    element.classList.add('highlight');
+                    setTimeout(() => element.classList.remove('highlight'), 1200);
+                }
+            });
         }
 
         function renderAll() {
-            if (!confirm("⚠️ CẢNH BÁO: Hiển thị tất cả có thể gây lag!")) return;
-            loadingMsg.innerText = "Rendering all...";
-            setTimeout(() => { renderDown(displayData.length - renderedEnd); }, 50);
+            if (displayData.length <= MAX_RENDERED_CARDS) {
+                renderWindowAroundIndex(0);
+                return;
+            }
+            alert(`Chế độ tối ưu đang giữ tối đa ${MAX_RENDERED_CARDS} thẻ trên màn hình. Dùng tìm kiếm, ngày, Feed/Ord hoặc ±300 để tới vị trí khác mà không làm trình duyệt bị đơ.`);
         }
 
         function scrollOffset(amount) {
-            const cardHeight = 400; 
-            if (amount > 0) {
-                renderDown(amount);
-                setTimeout(() => scrollArea.scrollBy({ top: (amount/2)*cardHeight, behavior: 'smooth' }), 50);
-            } else {
-                scrollArea.scrollBy({ top: -((Math.abs(amount)/2)*cardHeight), behavior: 'smooth' });
-            }
+            const middle = Math.floor((renderedStart + renderedEnd) / 2);
+            renderWindowAroundIndex(middle + Number(amount || 0));
         }
 
         function jumpToId(vid) {
-            const index = displayData.findIndex(v => v.id === vid);
-            if (index === -1) { alert("Video không có trong danh sách lọc hiện tại!"); return; }
-            grid.innerHTML = '';
-            renderedStart = Math.max(0, index - 20); 
-            renderedEnd = renderedStart; 
-            renderDown(50);
-            setTimeout(() => {
-                const el = document.getElementById('card-' + vid);
-                if (el) {
-                    el.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    el.classList.add('highlight');
-                    setTimeout(() => el.classList.remove('highlight'), 2000);
-                }
-            }, 50);
+            const index = displayIndexById.get(String(vid));
+            if (index === undefined) { alert("Video không có trong danh sách lọc hiện tại!"); return; }
+            renderWindowAroundIndex(index, String(vid));
         }
 
         // --- NEW FUNCTIONS: Order Jump & End Scroll ---
@@ -507,22 +606,11 @@
         }
 
         function scrollToEnd() {
-            resetRender();
-            
-            // Force render the last batch
-            renderedEnd = displayData.length;
-            renderedStart = Math.max(0, renderedEnd - 50); // Render 50 item cuối
-            
-            const batch = displayData.slice(renderedStart, renderedEnd);
-            const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
-            grid.appendChild(fragment);
-            
-            loadingMsg.style.display = 'none';
-            
-            setTimeout(() => {
+            if (!displayData.length) return;
+            renderWindowAroundIndex(displayData.length - 1);
+            requestAnimationFrame(() => silenceProgrammaticScroll(() => {
                 scrollArea.scrollTop = scrollArea.scrollHeight;
-            }, 50);
+            }));
         }
 
         function renderSidebar() {
@@ -584,22 +672,16 @@
 
         function handleFilter() {
             if (!unlocked) return;
-            const term = searchInput.value.toLowerCase();
+            const term = searchInput.value.trim().toLocaleLowerCase('vi');
             const sortMode = sortSelect.value;
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => (!selectedTypes.size || selectedTypes.has(contentType(v))) && (!captionOnly || String(v.repost_caption || '').trim()) && (
-                (v.nickname && v.nickname.toLowerCase().includes(term)) || 
-                (v.date && v.date.includes(term)) ||
-                (v.repost_date && v.repost_date.includes(term)) ||
-                (v.repost_caption && v.repost_caption.toLowerCase().includes(term)) ||
-                (v.desc && v.desc.toLowerCase().includes(term)) ||
-                (v.uniqueId && v.uniqueId.toLowerCase().includes(term)) ||
-                String(v.id || '').includes(term) ||
-                String(v.music_title || '').toLowerCase().includes(term) ||
-                String(v.hashtags || '').toLowerCase().includes(term)
-            ));
+            displayData = fullData.filter((v, index) =>
+                (!selectedTypes.size || selectedTypes.has(contentType(v))) &&
+                (!captionOnly || String(v.repost_caption || '').trim()) &&
+                (!term || searchIndex[index].includes(term))
+            );
             document.getElementById('totalCount').innerText = displayData.length + '/' + fullData.length;
 
             if (sortMode === 'feed') {
@@ -617,7 +699,8 @@
             } else if (sortMode === 'newest_create') {
                 displayData.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
             }
-            
+
+            rebuildDisplayIndex();
             renderSidebar();
             scrollArea.scrollTop = 0;
             renderDown();
@@ -639,17 +722,23 @@ body.manual-edit-mode .manual-edit-button { display:block; }
 .manual-row { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
 #manualSyncStatus { font-size:.8rem; color:#b4cee9; padding:6px 0; white-space:normal; }
 #manualConflict { color:#ffd278; }
+.manual-private-status { color:#f4d96a; font-size:.82rem; align-self:center; }
 .manual-dialog .manual-remember { display:flex; align-items:center; gap:8px; }
 .manual-dialog .manual-remember input { width:auto; margin:0; }
 #manualConflictActions[hidden] { display:none; }
 @media(max-width:768px) { .manual-dialog { position:fixed; inset:auto 0 0; margin:0 auto; width:100%; border-radius:14px 14px 0 0; padding-bottom:max(16px,env(safe-area-inset-bottom)); } }
 </style><dialog id="manualDialog" class="manual-dialog" aria-labelledby="manualTitle">
   <form id="manualForm">
-    <div class="manual-heading"><h3 id="manualTitle">Sửa ngày / caption repost</h3><button type="button" data-close="manualDialog" aria-label="Đóng">✕</button></div>
+    <div class="manual-heading"><h3 id="manualTitle">Sửa thông tin repost</h3><button type="button" data-close="manualDialog" aria-label="Đóng">✕</button></div>
     <p id="manualIdentity"></p>
     <label>Ngày repost <input id="manualDate" type="date"></label>
     <div class="manual-row"><button type="button" id="manualPreviousDay">−1 ngày</button><button type="button" id="manualLastDate">Ngày vừa dùng</button><button type="button" id="manualNextDay">+1 ngày</button></div>
+    <label>Giờ repost chính xác <input id="manualTime" type="datetime-local" step="1"></label>
+    <div class="manual-row"><button type="button" id="manualTimeNow">Giờ hiện tại</button><button type="button" id="manualTimeClear">Xóa giờ</button><span id="manualTimeSummary" class="manual-private-status"></span></div>
     <label>Caption repost <textarea id="manualCaption" rows="4" maxlength="5000"></textarea></label>
+    <label>Nhãn công khai <textarea id="manualTags" rows="2" placeholder="Mỗi nhãn một dòng; dấu phẩy được giữ trong tên nhãn"></textarea></label>
+    <label>Ghi chú riêng tư <textarea id="manualNotes" rows="5" maxlength="20000"></textarea></label>
+    <p class="manual-private-status">Ngày, giờ, caption và nhãn hiện hành có thể xuất lên GitHub sau lớp 2211. Ghi chú không nằm trong HTML/data JS; cả bản server lẫn bản local chỉ hiện trong giao diện sau khi GAS xác thực. Nháp note chưa gửi vẫn được giữ nguyên nhưng bị khóa.</p>
     <p id="manualConflict" role="status"></p>
     <div id="manualConflictActions" hidden><button type="button" id="manualKeepLocal">Giữ bản local, gửi lại</button><button type="button" id="manualUseServer">Dùng bản server</button></div>
     <p id="manualFormMessage" role="status"></p>
@@ -659,10 +748,10 @@ body.manual-edit-mode .manual-edit-button { display:block; }
 <dialog id="manualSettings" class="manual-dialog" aria-labelledby="manualSettingsTitle">
   <form id="manualSettingsForm">
     <div class="manual-heading"><h3 id="manualSettingsTitle">Đồng bộ chỉnh sửa</h3><button type="button" data-close="manualSettings" aria-label="Đóng">✕</button></div>
-    <p>Lưu local trước, GAS xác nhận sau. Đóng trình duyệt có thể dừng đồng bộ; mở lại để tiếp tục. Token không nằm trong HTML hoặc bản export.</p>
+    <p>Lưu local trước, GAS xác nhận sau. Đóng trình duyệt có thể dừng đồng bộ; mở lại để tiếp tục. Token không nằm trong HTML hoặc bản export. Bridge cũ chỉ nhận ngày/caption; bridge mới đồng bộ đủ năm trường và chỉ mở ghi chú server sau khi xác thực.</p>
     <label>GAS Web App URL <input id="manualGasUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec"></label>
     <button type="button" id="manualSaveUrl">Lưu URL API (không cần token)</button>
-    <label>Token riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
+    <label>Token mở dữ liệu riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
     <label class="manual-remember"><input id="manualRememberToken" type="checkbox" checked> Nhớ token trên thiết bị này</label>
     <p>Chỉ bật trên thiết bị cá nhân. Token được lưu trong trình duyệt theo user và URL GAS, không nhúng vào HTML hoặc backup. Người/mã chạy trên cùng website có thể đọc bộ nhớ trình duyệt.</p>
     <div class="manual-row"><button type="submit" class="btn-primary">Kết nối & đồng bộ</button><button type="button" id="manualDisconnect">Ngắt GAS</button><button type="button" id="manualForgetToken">Quên token</button><button type="button" id="manualExport">Xuất backup JSON</button></div>
@@ -678,14 +767,39 @@ body.manual-edit-mode .manual-edit-button { display:block; }
   const urlKey = 'tiktok-gas-url:'+profile+':'+defaultUrl;
   const tokenKey = () => 'tiktok-gas-token:'+profile+':'+gasUrl;
   const rememberKey = 'tiktok-remember-token:'+profile;
-  const fields = ['repost_date','repost_caption'];
+  const legacyFields = ['repost_date','repost_caption'];
+  const publicFields = [...legacyFields,'repost_time','tags'];
+  const privateFields = ['notes'];
+  const fields = [...publicFields,...privateFields];
   const empty = () => ({records:{},outbox:[],history:[],drafts:{},cursor:0,lastDate:''});
-  let db, state = empty(), videos = new Map(), baseline = new Map(), ready = false, busy = false;
-  let activeId = null, opening = {}, dateTouched = false, saveBusy = false, draftTimer, gasUrl = '', token = '';
+  let db, state = empty(), videos = new Map(), baseline = new Map(), appliedOverlay = new Map(), ready = false, busy = false;
+  let activeId = null, opening = {}, dateTouched = false, timeTouched = false, noteWriteAllowed = false, saveBusy = false, draftTimer, gasUrl = '', token = '';
   let bridge, peer, peerOrigin, channel, bridgeReady, connectReject, bridgeTimer, lastError = '';
+  let bridgeCapabilities = null, privateUnlocked = false;
   const requests = new Map();
   const uid = () => crypto.randomUUID();
-  const textValues = value => Object.fromEntries(fields.map(k => [k,String(value[k] ?? '')]));
+  const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  const canonical = value => JSON.stringify(value === undefined ? null : value);
+  const defaults = () => ({repost_date:'',repost_time:null,repost_caption:'',tags:[],notes:''});
+  // Public JS may contain the converged current time/labels selected by the
+  // exporter. Notes, revision heads, conflicts and history never enter it.
+  const publicBaseline = value => ({...defaults(),repost_date:String(value.repost_date ?? ''),
+    repost_time:clone(value.repost_time ?? null),repost_caption:String(value.repost_caption ?? ''),
+    tags:Array.isArray(value.tags) ? value.tags.map(String) : []});
+  const fieldValues = value => {
+    const result = defaults();
+    for(const key of fields) if(value && Object.prototype.hasOwnProperty.call(value,key)) result[key] = clone(value[key]);
+    result.repost_date = String(result.repost_date ?? ''); result.repost_caption = String(result.repost_caption ?? '');
+    result.tags = Array.isArray(result.tags) ? result.tags.map(String) : [];
+    result.notes = String(result.notes ?? ''); result.repost_time = result.repost_time ?? null;
+    return result;
+  };
+  const withPublicBaseline = (id,value) => fieldValues({
+    ...clone(baseline.get(String(id)) || defaults()),...clone(value || {})
+  });
+  const hasStoredNote = id => Object.prototype.hasOwnProperty.call(state.records[String(id)]?.fields || {},'notes') ||
+    state.outbox.some(op => String(op.video_id) === String(id) && Object.prototype.hasOwnProperty.call(op.patch || {},'notes')) ||
+    Object.prototype.hasOwnProperty.call(state.drafts[String(id)] || {},'notes');
   const status = document.createElement('div'); status.id = 'manualSyncStatus'; status.setAttribute('role','status');
   const group = document.createElement('div'); group.className = 'nav-group';
   group.innerHTML = '<button id="manualEditToggle" aria-pressed="false" disabled>✏️ Edit</button><button id="manualSyncNow">Đồng bộ</button><button id="manualConfigure">⚙️ Lưu/Sync</button>';
@@ -693,8 +807,14 @@ body.manual-edit-mode .manual-edit-button { display:block; }
   document.querySelector('.controls').appendChild(status);
   function showStatus() {
     const pending = state.outbox.length, conflicts = state.outbox.filter(v => v.status === 'conflict').length;
+    const blockedPending = bridgeCapabilities ? state.outbox.filter(op => Object.keys(op.patch || {}).some(key => !bridgeCapabilities.fields.includes(key))).length : 0;
+    const bridgeLabel = bridgeCapabilities?.manual_field_schema === 1 ?
+      (privateUnlocked ? 'GAS đã xác thực · ghi chú riêng đã mở' : 'bridge mới · ghi chú server đang khóa') :
+      (bridgeCapabilities ? 'bridge cũ: ngày/caption' : 'chưa kiểm tra bridge');
     status.textContent = !ready ? 'Chỉnh sửa chưa sẵn sàng' : (busy ? 'Đang đồng bộ GAS… ' : '') +
       (pending ? `Đã lưu trên thiết bị · ${pending} thay đổi chờ đồng bộ` : (gasUrl && token ? 'Không có thay đổi local đang chờ' : 'Lưu local · chưa kết nối GAS')) +
+      (gasUrl && token ? ' · '+bridgeLabel : '') +
+      (blockedPending ? ` · ${blockedPending} bản có trường chưa được server xác nhận, vẫn giữ local` : '') +
       (conflicts ? ` · ${conflicts} xung đột: mở ✏️ để xử lý` : '') + (lastError ? ' · ' + lastError : '');
   }
   function openDB() {
@@ -728,24 +848,57 @@ body.manual-edit-mode .manual-edit-button { display:block; }
     });
   }
   function effective(id) {
-    const result = {...(state.records[id]?.fields || {})};
-    state.outbox.filter(op => op.video_id === id).forEach(op => Object.assign(result,op.patch));
+    const server = clone(state.records[id]?.fields || {});
+    if(!privateUnlocked) delete server.notes;
+    const result = withPublicBaseline(id,server);
+    state.outbox.filter(op => op.video_id === id).forEach(op => {
+      const patch = clone(op.patch || {}); if(!privateUnlocked) delete patch.notes;
+      Object.assign(result,patch);
+    });
+    return result;
+  }
+  function effectiveMap() {
+    const result = new Map();
+    Object.entries(state.records || {}).forEach(([id,record]) => {
+      if(record?.fields) {
+        const server = clone(record.fields); if(!privateUnlocked) delete server.notes;
+        result.set(String(id),withPublicBaseline(id,server));
+      }
+    });
+    for(const op of state.outbox || []) {
+      const id = String(op.video_id);
+      const patch = clone(op.patch || {}); if(!privateUnlocked) delete patch.notes;
+      result.set(id,Object.assign(result.get(id) || withPublicBaseline(id,{}),patch));
+    }
     return result;
   }
   function applyLocal() {
-    videos.forEach((video,id) => Object.assign(video,baseline.get(id),effective(id)));
-    // Replace only cards already on screen; never re-sort/filter on a save.
+    const nextOverlay = effectiveMap();
+    const ids = new Set([...appliedOverlay.keys(),...nextOverlay.keys()]);
+    const changed = new Set(); let sidebarDirty = false;
+    for(const id of ids) {
+      const before = appliedOverlay.get(id) || {};
+      const after = nextOverlay.get(id) || {};
+      if(fields.every(key => canonical(before[key]) === canonical(after[key]))) continue;
+      const video = videos.get(id);
+      if(!video) continue;
+      if(String(before.repost_date ?? '') !== String(after.repost_date ?? '')) sidebarDirty = true;
+      Object.assign(video,clone(baseline.get(id)),clone(after)); changed.add(id);
+    }
+    appliedOverlay = nextOverlay;
+    // Replace only changed cards already on screen; never re-sort/filter on a save.
     const top = scrollArea.scrollTop;
     document.querySelectorAll('.card[id^="card-"]').forEach(card => {
-      const video = videos.get(card.id.slice(5));
+      const id = card.id.slice(5), video = changed.has(id) ? videos.get(id) : null;
       if(video) card.replaceWith(createCard(video));
     });
     scrollArea.scrollTop = top;
-    if(typeof renderSidebar === 'function') renderSidebar();
+    if(typeof refreshSearchIndexForIds === 'function') refreshSearchIndexForIds(changed);
+    if(sidebarDirty && typeof renderSidebar === 'function' && displayData.length) renderSidebar();
   }
   async function init(data) {
     videos = new Map(data.map(v => [String(v.id),v]));
-    baseline = new Map(data.map(v => [String(v.id),textValues(v)]));
+    baseline = new Map(data.map(v => [String(v.id),publicBaseline(v)]));
     try {
       db = await openDB(); state = await readState(); ready = true;
       gasUrl = localStorage.getItem(urlKey) || defaultUrl || localStorage.getItem('tiktok-gas-url') || '';
@@ -765,27 +918,79 @@ body.manual-edit-mode .manual-edit-button { display:block; }
   }
   function openEditor(id) {
     if(!ready || !videos.has(id)) return;
-    activeId = id; opening = textValues(videos.get(id));
+    activeId = id; opening = fieldValues(effective(id));
     const draft = state.drafts[id];
     dateTouched = !!draft?.dateTouched;
+    timeTouched = !!draft?.timeTouched;
     $('manualIdentity').textContent = '@'+profile+' · ID '+id+' · '+(videos.get(id).nickname || '');
     $('manualDate').value = draft?.repost_date ?? opening.repost_date;
     $('manualCaption').value = draft?.repost_caption ?? opening.repost_caption;
+    $('manualTags').value = draft?.tagsText ?? opening.tags.join('\n');
+    noteWriteAllowed = privateUnlocked || !hasStoredNote(id);
+    $('manualNotes').disabled = !noteWriteAllowed;
+    $('manualNotes').placeholder = privateUnlocked ? '' : (noteWriteAllowed ? 'Ghi chú mới sẽ được giữ local và khóa sau khi đóng' : 'Kết nối và xác thực GAS để mở ghi chú riêng');
+    $('manualNotes').value = privateUnlocked ? (draft?.notes ?? opening.notes) : '';
+    $('manualTime').value = draft?.timeInput ?? timeInput(opening.repost_time);
+    showTimeSummary(draft?.repost_time ?? opening.repost_time);
     $('manualFormMessage').textContent = draft ? 'Đã khôi phục bản nháp trên thiết bị.' : '';
     const conflict = state.outbox.find(op => op.video_id === id && op.status === 'conflict');
     $('manualConflictActions').hidden = !conflict;
     $('manualConflict').textContent = conflict ? 'Server đã có bản khác:\n'+JSON.stringify(conflict.current?.fields || {},null,2)+'\nChọn bản muốn giữ; không có bản nào tự ghi đè.' : '';
     if(!$('manualDialog').open) $('manualDialog').showModal();
   }
+  function timeInput(value) {
+    if(!value || value.kind !== 'exact' || !value.at) return '';
+    const date = new Date(value.at); if(!Number.isFinite(date.getTime())) return '';
+    const part = number => String(number).padStart(2,'0');
+    return `${date.getFullYear()}-${part(date.getMonth()+1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
+  }
+  function exactTime(value) {
+    if(!value) return null;
+    if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?$/.test(value)) throw new Error('Giờ repost không hợp lệ');
+    const date = new Date(value), offset = -date.getTimezoneOffset();
+    if(!Number.isFinite(date.getTime())) throw new Error('Giờ repost không hợp lệ');
+    const sign = offset >= 0 ? '+' : '-', absolute = Math.abs(offset), part = number => String(number).padStart(2,'0');
+    const seconds = value.length === 16 ? ':00' : '';
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Bangkok';
+    return {kind:'exact',zone,at:value+seconds+sign+part(Math.floor(absolute/60))+':'+part(absolute%60)};
+  }
+  function showTimeSummary(value) {
+    if(!value) { $('manualTimeSummary').textContent = timeTouched ? 'Đã chọn xóa giờ' : 'Chưa có giờ'; return; }
+    if(value.kind === 'exact') $('manualTimeSummary').textContent = 'Chính xác · '+value.at+' · '+value.zone;
+    else if(value.kind === 'range') $('manualTimeSummary').textContent = 'Khoảng · '+value.lower+' → '+value.upper+' · '+value.zone+' (nhập giờ để thay bằng mốc chính xác)';
+    else $('manualTimeSummary').textContent = 'Dữ liệu giờ cũ đang được giữ nguyên';
+  }
+  function tagsValue(text) {
+    const tags = text.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    const unique = [...new Set(tags)];
+    if(unique.length > 30) throw new Error('Tối đa 30 nhãn');
+    if(unique.some(value => value.length > 60)) throw new Error('Mỗi nhãn tối đa 60 ký tự');
+    return unique;
+  }
+  function draftValues() {
+    const savedDraft = state.drafts[activeId] || {};
+    return {repost_date:dateTouched ? $('manualDate').value : opening.repost_date,
+      repost_caption:$('manualCaption').value,tagsText:$('manualTags').value,
+      notes:noteWriteAllowed ? $('manualNotes').value : (savedDraft.notes ?? ''),
+      timeInput:$('manualTime').value,repost_time:timeTouched ? exactTime($('manualTime').value) : clone(opening.repost_time),
+      dateTouched,timeTouched};
+  }
+  function editorValues() {
+    const draft = draftValues();
+    return {repost_date:draft.repost_date,repost_time:draft.repost_time,repost_caption:draft.repost_caption,
+      tags:tagsValue(draft.tagsText),notes:draft.notes};
+  }
   function captureDraft() {
     clearTimeout(draftTimer);
-    const id = activeId, draft = {repost_date:dateTouched ? $('manualDate').value : opening.repost_date,repost_caption:$('manualCaption').value,dateTouched};
+    const id = activeId; let draft;
+    try { draft = draftValues(); } catch(error) { $('manualFormMessage').textContent = error.message; return; }
     draftTimer = setTimeout(() => mutate(s => { s.drafts[id] = draft; }).catch(reportError),200);
   }
   async function closeEditor() {
     clearTimeout(draftTimer);
     if(activeId && ready) {
-      const id = activeId, draft = {repost_date:dateTouched ? $('manualDate').value : opening.repost_date,repost_caption:$('manualCaption').value,dateTouched};
+      const id = activeId; let draft;
+      try { draft = draftValues(); } catch(error) { $('manualFormMessage').textContent = 'Không giữ được nháp: '+error.message; return; }
       try { await mutate(s => { s.drafts[id] = draft; }); }
       catch(error) { $('manualFormMessage').textContent = 'Không giữ được nháp: '+error.message; return; }
     }
@@ -797,15 +1002,19 @@ body.manual-edit-mode .manual-edit-button { display:block; }
     clearTimeout(draftTimer);
     try {
       if(!$('manualDate').checkValidity()) throw new Error('Ngày không hợp lệ');
-      const id = activeId, values = {repost_date:dateTouched ? $('manualDate').value : opening.repost_date,repost_caption:$('manualCaption').value};
-      const patch = Object.fromEntries(fields.filter(k => values[k] !== opening[k]).map(k => [k,values[k]]));
+      if(!$('manualTime').checkValidity()) throw new Error('Giờ không hợp lệ');
+      const id = activeId, values = editorValues();
+      const editableFields = noteWriteAllowed ? fields : publicFields;
+      const patch = Object.fromEntries(editableFields.filter(k => canonical(values[k]) !== canonical(opening[k])).map(k => [k,clone(values[k])]));
       if(values.repost_caption.length > 5000) throw new Error('Caption tối đa 5000 ký tự');
+      if(values.notes.length > 20000) throw new Error('Ghi chú tối đa 20000 ký tự');
       await mutate(s => {
         if(s.outbox.some(op => op.video_id === id && op.status === 'conflict')) throw new Error('Hãy xử lý xung đột trước khi lưu tiếp.');
         if(Object.keys(patch).length) {
           const prior = s.outbox.filter(op => op.video_id === id).at(-1);
-          const op = {op_id:uid(),profile,video_id:id,patch,base_values:{...opening},
-                      base_revision:s.records[id]?.revision || 0,after_op:prior?.op_id || '',created_at:new Date().toISOString(),status:'pending'};
+          const op = {op_id:uid(),legacy_op_id:uid(),profile,video_id:id,patch,base_values:clone(opening),
+                      base_revision:s.records[id]?.revision || 0,after_op:prior?.op_id || '',
+                      legacy_after_op:prior?.legacy_op_id || '',created_at:new Date().toISOString(),status:'pending'};
           s.outbox.push(op); s.history.push({...op,event:'local_save'});
         }
         delete s.drafts[id]; if(values.repost_date) s.lastDate = values.repost_date;
@@ -830,16 +1039,20 @@ body.manual-edit-mode .manual-edit-button { display:block; }
       s.outbox = s.outbox.filter(op => op.video_id !== id);
       s.history.push({event:keepLocal?'resolve_local':'resolve_server',video_id:id,operations:ops,at:new Date().toISOString()});
       s.records[id] = conflict.current || {fields:{},revision:0};
-      if(keepLocal) s.outbox.push({op_id:uid(),profile,video_id:id,patch,base_revision:s.records[id].revision,after_op:'',base_values:s.records[id].fields,status:'pending',created_at:new Date().toISOString()});
+      if(keepLocal) s.outbox.push({op_id:uid(),legacy_op_id:uid(),profile,video_id:id,patch,base_revision:s.records[id].revision,
+        after_op:'',legacy_after_op:'',base_values:clone(s.records[id].fields),status:'pending',created_at:new Date().toISOString()});
       delete s.drafts[id];
     });
     openEditor(id); sync();
   }
   function disconnect() {
     clearTimeout(bridgeTimer); connectReject?.(new Error('Đã ngắt kết nối')); connectReject = null;
-    token = ''; peer = null; bridgeReady = null;
+    token = ''; peer = null; bridgeReady = null; bridgeCapabilities = null; privateUnlocked = false;
     if(bridge) bridge.remove(); bridge = null;
     requests.forEach(p => { clearTimeout(p.timer); p.reject(new Error('Đã ngắt kết nối')); }); requests.clear();
+    applyLocal();
+    if(activeId && $('manualDialog').open) openEditor(activeId);
+    if(ready) applyLocal();
     showStatus();
   }
   function connectBridge() {
@@ -876,40 +1089,109 @@ body.manual-edit-mode .manual-edit-button { display:block; }
       requests.set(id,{resolve,reject,timer}); peer.postMessage({type:'manual-rpc',channel,id,payload:{...payload,token}},peerOrigin);
     });
   }
+  async function negotiateCapabilities() {
+    if(bridgeCapabilities) return bridgeCapabilities;
+    const response = await rpc({action:'capabilities',profile,workspace:'main',client_manual_field_schema:1,client_private_read_schema:1});
+    if(response?.ok) {
+      const privateRead = response.authenticated === true && response.private_read_schema === 1 &&
+        Array.isArray(response.private_fields) && privateFields.every(field => response.private_fields.includes(field));
+      // An older five-field bridge did authenticate the token, but did not
+      // state that private reads were supported. Fail closed and use only the
+      // legacy two-field transport until that deployment advertises the gate.
+      const schema = response.manual_field_schema === 1 && privateRead ? 1 : 0;
+      const advertised = Array.isArray(response.fields) ? response.fields : legacyFields;
+      if(schema === 1 && !fields.every(field => advertised.includes(field))) throw new Error('Bridge báo schema 5 trường nhưng thiếu capability; giữ toàn bộ local');
+      bridgeCapabilities = {manual_field_schema:schema,private_read_schema:schema,fields:schema === 1 ? fields : legacyFields};
+      privateUnlocked = schema === 1;
+      applyLocal();
+      if(activeId && $('manualDialog').open) openEditor(activeId);
+      showStatus(); return bridgeCapabilities;
+    }
+    const message = String(response?.error || '');
+    if(/Action not allowed|Unsupported|không hỗ trợ/i.test(message)) {
+      // Deployed v1 bridge predates capability discovery. It is safe only for
+      // date/caption; extended fields remain in IndexedDB and are never sent.
+      bridgeCapabilities = {manual_field_schema:0,private_read_schema:0,fields:legacyFields};
+      privateUnlocked = false;
+      applyLocal();
+      if(activeId && $('manualDialog').open) openEditor(activeId);
+      showStatus(); return bridgeCapabilities;
+    }
+    throw new Error(message || 'Không xác minh được capability của bridge; giữ thay đổi local');
+  }
+  function mergeRecord(oldRecord,item) {
+    if(!item || typeof item !== 'object') return oldRecord;
+    const old = oldRecord || {fields:{},revision:0};
+    return {...old,...clone(item),fields:{...(old.fields || {}),...(clone(item.fields) || {})}};
+  }
+  function sendable(op, capability) {
+    return Object.keys(op.patch || {}).some(field => capability.fields.includes(field));
+  }
+  function wireOperation(op, capability) {
+    const full = capability.manual_field_schema === 1;
+    const patch = Object.fromEntries(Object.entries(op.patch || {}).filter(([field]) => capability.fields.includes(field)).map(([field,value]) => [field,clone(value)]));
+    if(!Object.keys(patch).length) return null;
+    const baseValues = Object.fromEntries(Object.entries(op.base_values || {}).filter(([field]) => field in patch).map(([field,value]) => [field,clone(value)]));
+    return {op_id:full ? op.op_id : op.legacy_op_id,profile,video_id:op.video_id,patch,base_values:baseValues,
+      base_revision:op.base_revision || 0,after_op:full ? (op.after_op || '') : (op.legacy_after_op || ''),created_at:op.created_at};
+  }
   async function sync() {
     if(!ready || busy || !token || !gasUrl || !navigator.onLine) { showStatus(); return; }
     busy = true; showStatus();
     try {
       state = await readState();
-      const blocked = new Set(state.outbox.filter(op => op.status === 'conflict').map(op => op.video_id));
-      const ops = []; let payloadSize = 2048;
-      for(const op of state.outbox.filter(op => !blocked.has(op.video_id))) {
-        const size = JSON.stringify(op).length;
-        if(ops.length >= 20 || (ops.length && payloadSize + size > 150000)) break;
-        ops.push(op); payloadSize += size;
+      const capability = await negotiateCapabilities();
+      if(capability.manual_field_schema !== 1 && state.outbox.some(op => !op.legacy_op_id)) {
+        // Persist transport identities before the request. Lost ACK/retry must
+        // reuse the same ID while leaving the original five-field op intact.
+        await mutate(s => {
+          const previous = new Map();
+          for(const op of s.outbox) {
+            if(!op.legacy_op_id) op.legacy_op_id = uid();
+            if(op.legacy_after_op === undefined) op.legacy_after_op = previous.get(op.video_id) || '';
+            previous.set(op.video_id,op.legacy_op_id);
+          }
+        });
+        state = await readState();
       }
-      const response = await rpc({action:'sync',profile,cursor:state.cursor,ops});
+      const blocked = new Set(state.outbox.filter(op => op.status === 'conflict').map(op => op.video_id));
+      const ops = [], sent = new Map(); let payloadSize = 2048;
+      for(const op of state.outbox.filter(op => !blocked.has(op.video_id) && sendable(op,capability))) {
+        const wire = wireOperation(op,capability), size = JSON.stringify(wire).length;
+        if(ops.length >= 20 || (ops.length && payloadSize + size > 150000)) break;
+        ops.push(wire); sent.set(wire.op_id,{local:op.op_id,fields:Object.keys(wire.patch),full:capability.manual_field_schema === 1}); payloadSize += size;
+      }
+      const response = await rpc({action:'sync',profile,cursor:state.cursor,ops,client_manual_field_schema:capability.manual_field_schema,
+        client_private_read_schema:capability.private_read_schema});
       if(!response?.ok) throw new Error(response?.error || 'Phản hồi GAS không hợp lệ');
       await mutate(s => {
-        for(const item of response.changes || []) if((s.records[item.video_id]?.revision || 0) <= item.revision) s.records[item.video_id] = item;
+        for(const item of response.changes || []) if((s.records[item.video_id]?.revision || 0) <= item.revision) s.records[item.video_id] = mergeRecord(s.records[item.video_id],item);
         for(const ack of response.acks || []) {
-          const op = s.outbox.find(v => v.op_id === ack.op_id); if(!op) continue;
+          const delivery = sent.get(ack.op_id); if(!delivery) continue;
+          const op = s.outbox.find(v => v.op_id === delivery.local); if(!op) continue;
           if(ack.status === 'ok') {
             if(!ack.state || ack.state.video_id !== op.video_id) throw new Error('GAS chưa trả bản đã lưu; giữ lại hàng đợi');
-            if((s.records[op.video_id]?.revision || 0) <= ack.state.revision) s.records[op.video_id] = ack.state;
-            s.history.push({event:'server_ack',op_id:op.op_id,revision:ack.revision}); s.outbox = s.outbox.filter(v => v.op_id !== op.op_id);
+            if((s.records[op.video_id]?.revision || 0) <= ack.state.revision) s.records[op.video_id] = mergeRecord(s.records[op.video_id],ack.state);
+            s.history.push({event:'server_ack',op_id:op.op_id,transport_op_id:ack.op_id,fields:delivery.fields,revision:ack.revision});
+            if(delivery.full) s.outbox = s.outbox.filter(v => v.op_id !== op.op_id);
+            else {
+              for(const field of delivery.fields) { delete op.patch[field]; delete op.base_values[field]; }
+              if(Object.keys(op.patch).length) { op.base_revision = ack.state.revision; op.after_op = ack.op_id; op.status = 'pending'; }
+              else s.outbox = s.outbox.filter(v => v.op_id !== op.op_id);
+            }
           }
-          else { op.status = 'conflict'; op.current = ack.current; }
+          else { op.status = 'conflict'; op.current = mergeRecord(s.records[op.video_id],ack.current); }
         }
         s.cursor = response.cursor;
       });
       lastError = '';
-      if(response.has_more || state.outbox.some(op => !blocked.has(op.video_id) && op.status !== 'conflict')) setTimeout(sync,500);
+      if(response.has_more || state.outbox.some(op => !blocked.has(op.video_id) && op.status !== 'conflict' && sendable(op,capability))) setTimeout(sync,500);
     } catch(error) { lastError = error.message; }
     finally { busy = false; showStatus(); }
   }
   async function exportBackup() {
     if(!ready) return;
+    if(!privateUnlocked) throw new Error('Cần GAS xác thực trước khi xuất backup có dữ liệu riêng. Dữ liệu local vẫn được giữ nguyên.');
     state = await readState();
     const ids = new Set([...Object.keys(state.records),...state.outbox.map(op => op.video_id)]);
     const changes = [...ids].map(id => ({video_id:id,patch:effective(id),base_values:state.records[id]?.base_values || baseline.get(id) || {},revision:state.records[id]?.revision || 0,
@@ -923,7 +1205,15 @@ body.manual-edit-mode .manual-edit-button { display:block; }
   $('manualSyncNow').onclick = () => { if(!token || !gasUrl) $('manualSettings').showModal(); else sync(); };
   $('manualForm').onsubmit = event => { event.preventDefault(); saveEditor(); };
   $('manualSaveNext').onclick = () => saveEditor(true);
-  $('manualDate').oninput = () => { dateTouched = true; captureDraft(); }; $('manualCaption').oninput = captureDraft;
+  $('manualDate').oninput = () => { dateTouched = true; captureDraft(); };
+  $('manualTime').oninput = () => { timeTouched = true; let value = null; try { value = exactTime($('manualTime').value); } catch {} showTimeSummary(value); captureDraft(); };
+  $('manualCaption').oninput = captureDraft; $('manualTags').oninput = captureDraft; $('manualNotes').oninput = captureDraft;
+  $('manualTimeNow').onclick = () => {
+    const date = new Date(), part = number => String(number).padStart(2,'0');
+    $('manualTime').value = `${date.getFullYear()}-${part(date.getMonth()+1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
+    timeTouched = true; showTimeSummary(exactTime($('manualTime').value)); captureDraft();
+  };
+  $('manualTimeClear').onclick = () => { $('manualTime').value = ''; timeTouched = true; showTimeSummary(null); captureDraft(); };
   $('manualPreviousDay').onclick = () => shiftDay(-1); $('manualNextDay').onclick = () => shiftDay(1);
   $('manualLastDate').onclick = () => { if(state.lastDate) { $('manualDate').value = state.lastDate; dateTouched = true; captureDraft(); } };
   $('manualKeepLocal').onclick = () => resolveConflict(true).catch(reportError);

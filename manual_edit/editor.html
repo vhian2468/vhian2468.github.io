@@ -1,10 +1,15 @@
 <dialog id="manualDialog" class="manual-dialog" aria-labelledby="manualTitle">
   <form id="manualForm">
-    <div class="manual-heading"><h3 id="manualTitle">Sửa ngày / caption repost</h3><button type="button" data-close="manualDialog" aria-label="Đóng">✕</button></div>
+    <div class="manual-heading"><h3 id="manualTitle">Sửa thông tin repost</h3><button type="button" data-close="manualDialog" aria-label="Đóng">✕</button></div>
     <p id="manualIdentity"></p>
     <label>Ngày repost <input id="manualDate" type="date"></label>
     <div class="manual-row"><button type="button" id="manualPreviousDay">−1 ngày</button><button type="button" id="manualLastDate">Ngày vừa dùng</button><button type="button" id="manualNextDay">+1 ngày</button></div>
+    <label>Giờ repost chính xác <input id="manualTime" type="datetime-local" step="1"></label>
+    <div class="manual-row"><button type="button" id="manualTimeNow">Giờ hiện tại</button><button type="button" id="manualTimeClear">Xóa giờ</button><span id="manualTimeSummary" class="manual-private-status"></span></div>
     <label>Caption repost <textarea id="manualCaption" rows="4" maxlength="5000"></textarea></label>
+    <label>Nhãn công khai <textarea id="manualTags" rows="2" placeholder="Mỗi nhãn một dòng; dấu phẩy được giữ trong tên nhãn"></textarea></label>
+    <label>Ghi chú riêng tư <textarea id="manualNotes" rows="5" maxlength="20000"></textarea></label>
+    <p class="manual-private-status">Ngày, giờ, caption và nhãn hiện hành có thể xuất lên GitHub sau lớp 2211. Ghi chú không nằm trong HTML/data JS; cả bản server lẫn bản local chỉ hiện trong giao diện sau khi GAS xác thực. Nháp note chưa gửi vẫn được giữ nguyên nhưng bị khóa.</p>
     <p id="manualConflict" role="status"></p>
     <div id="manualConflictActions" hidden><button type="button" id="manualKeepLocal">Giữ bản local, gửi lại</button><button type="button" id="manualUseServer">Dùng bản server</button></div>
     <p id="manualFormMessage" role="status"></p>
@@ -14,10 +19,10 @@
 <dialog id="manualSettings" class="manual-dialog" aria-labelledby="manualSettingsTitle">
   <form id="manualSettingsForm">
     <div class="manual-heading"><h3 id="manualSettingsTitle">Đồng bộ chỉnh sửa</h3><button type="button" data-close="manualSettings" aria-label="Đóng">✕</button></div>
-    <p>Lưu local trước, GAS xác nhận sau. Đóng trình duyệt có thể dừng đồng bộ; mở lại để tiếp tục. Token không nằm trong HTML hoặc bản export.</p>
+    <p>Lưu local trước, GAS xác nhận sau. Đóng trình duyệt có thể dừng đồng bộ; mở lại để tiếp tục. Token không nằm trong HTML hoặc bản export. Bridge cũ chỉ nhận ngày/caption; bridge mới đồng bộ đủ năm trường và chỉ mở ghi chú server sau khi xác thực.</p>
     <label>GAS Web App URL <input id="manualGasUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec"></label>
     <button type="button" id="manualSaveUrl">Lưu URL API (không cần token)</button>
-    <label>Token riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
+    <label>Token mở dữ liệu riêng <input id="manualGasToken" type="password" autocomplete="off"></label>
     <label class="manual-remember"><input id="manualRememberToken" type="checkbox" checked> Nhớ token trên thiết bị này</label>
     <p>Chỉ bật trên thiết bị cá nhân. Token được lưu trong trình duyệt theo user và URL GAS, không nhúng vào HTML hoặc backup. Người/mã chạy trên cùng website có thể đọc bộ nhớ trình duyệt.</p>
     <div class="manual-row"><button type="submit" class="btn-primary">Kết nối & đồng bộ</button><button type="button" id="manualDisconnect">Ngắt GAS</button><button type="button" id="manualForgetToken">Quên token</button><button type="button" id="manualExport">Xuất backup JSON</button></div>

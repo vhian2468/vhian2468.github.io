@@ -19,6 +19,9 @@ function setup_() {
 }
 
 function doGet(e) {
+  // Apps Script's Run button invokes this without an HTTP event. Keep that
+  // diagnostic path harmless; a real bridge still has to pass origin/channel.
+  e = e && e.parameter ? e : {parameter:{}};
   if(e.parameter.bridge !== '1') return HtmlService.createHtmlOutput('TikTok edit sync endpoint. Configure the bridge in your HTML editor.');
   const origin = String(e.parameter.parent || '');
   const allowed = (PropertiesService.getScriptProperties().getProperty('ALLOWED_ORIGINS') || '').split(',').map(v=>v.trim());
@@ -43,11 +46,19 @@ function manualRpc(request) {
     const expected = properties.getProperty('API_TOKEN') || '';
     if(!expected || typeof request.token !== 'string' || !equalToken_(request.token,expected)) throw new Error('Unauthorized');
     if(request.profile !== properties.getProperty('ALLOWED_PROFILE')) throw new Error('Profile not allowed');
-    if(!['sync','pull'].includes(request.action)) throw new Error('Action not allowed');
+    if(!['sync','pull','export_journal','capabilities'].includes(request.action)) throw new Error('Action not allowed');
     if(JSON.stringify(request).length > 200000) throw new Error('Request too large');
+    const manualFieldSchema = properties.getProperty('MANUAL_FIELD_SCHEMA') === '1' ? 1 : 0;
+    if(request.action === 'capabilities') return {
+      ok:true,service:'tiktok-manual-bridge-v2',authenticated:true,auth_mode:'bearer_token',
+      manual_field_schema:manualFieldSchema,private_read_schema:manualFieldSchema,
+      fields:manualFieldSchema === 1 ? ['repost_date','repost_time','repost_caption','tags','notes'] : ['repost_date','repost_caption'],
+      public_fields:manualFieldSchema === 1 ? ['repost_date','repost_time','repost_caption','tags'] : ['repost_date','repost_caption'],
+      private_fields:manualFieldSchema === 1 ? ['notes'] : []
+    };
     const lock = LockService.getScriptLock();
     if(!lock.tryLock(5000)) throw new Error('Busy; retry later');
-    try { return execute_(request,properties); } finally { lock.releaseLock(); }
+    try { return legacyMigrationDispatch_(request,properties); } finally { lock.releaseLock(); }
   } catch(error) { return {ok:false,error:String(error.message || error)}; }
 }
 
@@ -57,25 +68,70 @@ function equalToken_(a,b) {
   return difference === 0;
 }
 
-function canonicalOp_(op,profile) {
+function canonicalManualValue_(key,value) {
+  if(key === 'repost_date') {
+    if(typeof value !== 'string' || value && !validDate_(value)) throw new Error('Invalid date');
+    return value;
+  }
+  if(key === 'repost_caption') {
+    if(typeof value !== 'string' || value.length > 5000) throw new Error('Invalid/long caption');
+    return value;
+  }
+  if(key === 'notes') {
+    if(typeof value !== 'string' || value.length > 20000) throw new Error('Invalid/long notes');
+    return value;
+  }
+  if(key === 'tags') {
+    if(!Array.isArray(value) || value.length > 30 || new Set(value).size !== value.length ||
+       value.some(tag=>typeof tag !== 'string' || !tag.trim() || tag !== tag.trim() || tag.length > 60)) throw new Error('Invalid tags');
+    return value.slice();
+  }
+  if(key === 'repost_time') {
+    if(value === null) return null;
+    if(!value || typeof value !== 'object' || Array.isArray(value) || !['exact','range'].includes(value.kind) ||
+       typeof value.zone !== 'string' || !value.zone || value.zone.length > 100) throw new Error('Invalid repost time');
+    const keys=Object.keys(value).sort().join('|');
+    if(value.kind === 'exact') {
+      if(keys !== 'at|kind|zone' || !validInstant_(value.at)) throw new Error('Invalid exact repost time');
+    } else if(keys !== 'kind|lower|upper|zone' || !validInstant_(value.lower) || !validInstant_(value.upper) || Date.parse(value.lower)>Date.parse(value.upper)) {
+      throw new Error('Invalid repost time range');
+    }
+    return JSON.parse(JSON.stringify(value));
+  }
+  throw new Error('Unsupported field');
+}
+
+function validInstant_(value) {
+  return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function canonicalOp_(op,profile,manualFieldSchema,privateRead) {
   if(op.profile !== profile || !/^\d{15,25}$/.test(String(op.video_id))) throw new Error('Invalid profile/video ID');
   if(!/^[a-f0-9-]{36}$/i.test(op.op_id)) throw new Error('Invalid operation ID');
   if(!Number.isSafeInteger(op.base_revision) || op.base_revision < 0) throw new Error('Invalid base revision');
   const patch = op.patch;
   if(!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid patch');
   const keys = Object.keys(patch).sort();
-  if(!keys.length || keys.some(k=>!['repost_date','repost_caption'].includes(k))) throw new Error('Unsupported fields');
+  const allowed=manualFieldSchema === 1 ? ['repost_date','repost_time','repost_caption','tags','notes'] : ['repost_date','repost_caption'];
+  if(!keys.length || keys.some(k=>!allowed.includes(k))) throw new Error('Unsupported fields');
+  const allowPrivate=privateRead===undefined?manualFieldSchema===1:privateRead===true;
+  if(keys.includes('notes')&&!allowPrivate)throw new Error('Private note requires authenticated private-read capability');
   const normalized = {}, base = {};
   keys.forEach(key => {
-    const value = patch[key];
-    if(typeof value !== 'string') throw new Error('Field must be text');
-    if(key === 'repost_caption' && value.length > 5000) throw new Error('Caption too long');
-    if(key === 'repost_date' && value && !validDate_(value)) throw new Error('Invalid date');
-    normalized[key] = value;
-    if(op.base_values && typeof op.base_values[key] === 'string') base[key] = op.base_values[key];
+    normalized[key] = canonicalManualValue_(key,patch[key]);
+    if(op.base_values && Object.prototype.hasOwnProperty.call(op.base_values,key)) base[key] = canonicalManualValue_(key,op.base_values[key]);
   });
   if(op.after_op && !/^[a-f0-9-]{36}$/i.test(op.after_op)) throw new Error('Invalid dependency');
   return {op_id:op.op_id,profile,video_id:String(op.video_id),base_revision:op.base_revision,after_op:op.after_op||'',patch:normalized,base_values:base};
+}
+
+function clientState_(state,privateRead) {
+  const result=JSON.parse(JSON.stringify(state));
+  if(!privateRead){
+    if(result.fields)delete result.fields.notes;
+    if(result.base_values)delete result.base_values.notes;
+  }
+  return result;
 }
 
 function validDate_(value) {
@@ -102,9 +158,11 @@ function execute_(request,properties) {
   if(!Number.isSafeInteger(cursor) || cursor < 0 || cursor > sequence) throw new Error('Invalid/stale cursor; server history may have been restored. Reconnect after exporting backup.');
   const operations = request.action === 'sync' ? request.ops || [] : [];
   if(!Array.isArray(operations) || operations.length > 20) throw new Error('Maximum 20 operations per batch');
+  const manualFieldSchema=properties.getProperty('MANUAL_FIELD_SCHEMA') === '1' && request.client_manual_field_schema === 1 ? 1 : 0;
+  const privateRead=manualFieldSchema===1&&request.client_private_read_schema===1;
   const acks = [], newRows = [];
   operations.forEach(raw => {
-    const op = canonicalOp_(raw,request.profile), previous = seen.get(op.op_id);
+    const op = canonicalOp_(raw,request.profile,manualFieldSchema,privateRead), previous = seen.get(op.op_id);
     if(previous) {
       if(JSON.stringify(previous.request) !== JSON.stringify(op)) throw new Error('Operation ID reused with different data');
       acks.push({op_id:op.op_id,status:'ok',revision:previous.state.revision,state:previous.state}); return;
@@ -140,8 +198,61 @@ function execute_(request,properties) {
     if(projection.length) edits.getRange(2,1,projection.length,6).setNumberFormat('@').setValues(projection);
   }
   const boundary = Math.min(sequence,cursor+300);
-  const changes = [...current.values()].filter(state => state.profile === request.profile && state.server_seq > cursor && state.server_seq <= boundary);
-  return {ok:true,acks,changes,cursor:boundary,has_more:boundary < sequence};
+  const changes = [...current.values()].filter(state => state.profile === request.profile && state.server_seq > cursor && state.server_seq <= boundary)
+    .map(state=>clientState_(state,privateRead));
+  const clientAcks=acks.map(ack=>{
+    const item={...ack};
+    if(item.state)item.state=clientState_(item.state,privateRead);
+    if(item.current)item.current=clientState_(item.current,privateRead);
+    return item;
+  });
+  return {ok:true,acks:clientAcks,changes,cursor:boundary,has_more:boundary < sequence};
 }
 
 function safeCell_(value) { return /^[=+\-@\t\r]/.test(value) ? "'"+value : value; }
+
+/* Read-only migration export and an administrator-owned freeze gate. The
+ * default remains unfrozen. Never accept a client request that changes this
+ * property; set/remove LEGACY_WRITES_FROZEN only in Script Properties. */
+function legacyMigrationDispatch_(request,properties){
+  if(request.action==='export_journal')return legacyExport_(request,properties);
+  if(properties.getProperty('LEGACY_WRITES_FROZEN')==='1'&&request.action==='sync'&&
+      Array.isArray(request.ops||[])&&(request.ops||[]).length)
+    throw Error('LEGACY_WRITES_FROZEN: migration in progress; retain local edits and retry after client upgrade');
+  return execute_(request,properties);
+}
+function legacyExportHash_(text){
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,text,Utilities.Charset.UTF_8)
+    .map(b=>('0'+((b+256)%256).toString(16)).slice(-2)).join('');
+}
+function legacyExport_(request,properties){
+  const sheetId=properties.getProperty('SPREADSHEET_ID');
+  const journal=SpreadsheetApp.openById(sheetId).getSheetByName('Journal');
+  if(!journal)throw Error('Missing Journal; do not initialize a replacement');
+  const cursor=request.cursor;
+  if(!Number.isSafeInteger(cursor)||cursor<0)throw Error('Invalid export cursor');
+  const last=Math.max(0,journal.getLastRow()-1);
+  const boundary=request.boundary===undefined?last:request.boundary;
+  if(!Number.isSafeInteger(boundary)||boundary<0||boundary>last||cursor>boundary)throw Error('Invalid export boundary');
+  if(cursor>0&&typeof request.snapshot_sha256!=='string')throw Error('Snapshot hash required');
+  const source=legacyExportHash_(sheetId+'|'+request.profile);
+  const authority=source.slice(0,8)+'-'+source.slice(8,12)+'-5'+source.slice(13,16)+'-a'+source.slice(17,20)+'-'+source.slice(20,32);
+  const cells=boundary?journal.getRange(2,1,boundary,8).getValues():[];
+  const snapshot=legacyExportHash_(JSON.stringify(cells));
+  if(request.snapshot_sha256!==undefined&&request.snapshot_sha256!==snapshot)throw Error('Journal snapshot changed; preserve partial export and start a new audit');
+  const items=[];let bytes=0,next=cursor;
+  for(let i=cursor;i<boundary&&items.length<100;i++){
+    const row=cells[i],operation=JSON.parse(row[6]),state=JSON.parse(row[7]);
+    if(operation.profile!==request.profile||state.profile!==request.profile||state.video_id!==operation.video_id||
+       state.server_seq!==i+1||String(row[0])!==operation.op_id||String(row[1])!==request.profile||
+       String(row[2])!==operation.video_id||Number(row[3])!==state.revision||Number(row[4])!==state.server_seq)
+      throw Error('Journal row scope/index mismatch');
+    const item={request:operation,state},size=JSON.stringify(item).length;
+    if(size>180000)throw Error('Journal row too large');
+    if(items.length&&bytes+size>180000)break;
+    items.push(item);bytes+=size;next=i+1;
+  }
+  return {ok:true,format:'legacy-annotation-export-v1',profile:request.profile,authority,
+          boundary,snapshot_sha256:snapshot,cursor:next,has_more:next<boundary,items,
+          writes_frozen:properties.getProperty('LEGACY_WRITES_FROZEN')==='1',current_server_seq:last};
+}

@@ -23,6 +23,8 @@
 !/tiktok_story_sync.py
 !/tiktok_manual_edits.py
 !/tiktok_manual_queue.py
+!/tiktok_manual_fields.py
+!/tiktok_public_export.py
 !/tiktok_manual_upload.py
 !/tiktok_manual_sync.py
 !/tiktok_manager_refresh.py
@@ -46,6 +48,7 @@
 *.pipeline.json
 *.manual_edits.json
 *.manual-queue.sqlite*
+*.manual-fields.sqlite*
 *.manual_edits.conflicts.json
 manual-edits-*.json
 .env*

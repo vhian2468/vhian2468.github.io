@@ -10,6 +10,21 @@ def model_hash(data):
                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
+def editor_value(widget):
+    """Read either an Entry or a multiline Text without changing its draft."""
+    try:
+        return widget.get()
+    except TypeError:
+        return widget.get("1.0", "end-1c")
+
+
+def clear_editor(widget):
+    try:
+        widget.delete(0, "end")
+    except Exception:
+        widget.delete("1.0", "end")
+
+
 class ManagerRefresh:
     def __init__(self):
         self.path = None
@@ -31,7 +46,8 @@ class ManagerRefresh:
         fields.update(repost_date=app.entry_repost_date, repost_caption=app.entry_repost_cap)
         # Do not strip: even unfinished whitespace is user input, not permission
         # to replace the form with a remote version.
-        return any(entry.get() != str(selected.get(key, "") or "") for key, entry in fields.items())
+        return any(editor_value(entry) != str(selected.get(key, "") or "")
+                   for key, entry in fields.items())
 
     def poll(self, app, dialog_open=False):
         if not app.current_file or self.path != str(Path(app.current_file).resolve()):
@@ -63,6 +79,10 @@ class ManagerRefresh:
         self.signature = None
         restored = False
         if selected in app.data:
+            if hasattr(app, "browse_anchor_vid"):
+                app.browse_anchor_vid = selected
+            if hasattr(app, "refresh_tree"):
+                app.refresh_tree()
             for item in app.tree.get_children():
                 if app.tree.item(item, "tags")[0] == selected:
                     app.tree.selection_set(item)
@@ -70,8 +90,8 @@ class ManagerRefresh:
                     restored = True
                     break
         if not restored:
-            app.entry_repost_date.delete(0, "end")
-            app.entry_repost_cap.delete(0, "end")
+            clear_editor(app.entry_repost_date)
+            clear_editor(app.entry_repost_cap)
             for entry in getattr(app, "extra_entries", {}).values():
                 entry.delete(0, "end")
         if scroll:

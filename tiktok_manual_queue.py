@@ -125,7 +125,9 @@ def recover(db, version):
             db.execute("UPDATE manual_saves SET status=? WHERE op_id=?", (status, identifier))
 
 
-def commit_manager_json(path, value, expected_version, **options):
+def commit_manager_json(path, value, expected_version, *, manual_source="pc_manager", **options):
+    if manual_source not in ("pc_manager", "pc_autofill", "pc_editor", "manual_import"):
+        raise ValueError("Unknown manual-save source")
     path = Path(path).resolve()
     proposed = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
     validate_bytes(proposed)
@@ -142,14 +144,25 @@ def commit_manager_json(path, value, expected_version, **options):
             recover(db, current.version)
             if not edits:
                 return commit_bytes(path, proposed, expected_version, **options)
-            payload = json.dumps(dict(format="pc-manual-save-v1", changes=edits),
+            # Additive local provenance; existing GAS date/caption transport still
+            # consumes the unchanged changes/base_values records. A JSON hash is
+            # snapshot evidence, never an invented remote revision/causal parent.
+            payload = json.dumps(dict(format="pc-manual-save-v1", changes=edits,
+                                      source=manual_source, base_revision=dict(kind="json_sha256", value=current.version)),
                                  ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             after = sha(proposed)
             with db:
                 db.execute("BEGIN IMMEDIATE")
-                previous = db.execute("""SELECT op_id FROM manual_saves
-                    WHERE before_sha256=? AND after_sha256=? AND payload=? AND status='prepared'""",
-                    (current.version, after, payload)).fetchone()
+                # Retrying an intent prepared by an older version keeps its ID
+                # and original payload, even if it lacks new provenance fields.
+                candidates = [row for row in db.execute("""SELECT op_id,payload FROM manual_saves
+                    WHERE before_sha256=? AND after_sha256=? AND status='prepared'""",
+                    (current.version, after))
+                    if json.loads(row[1]).get("format") == "pc-manual-save-v1"
+                    and json.loads(row[1]).get("changes") == edits]
+                if len(candidates) > 1:
+                    raise ValueError("Multiple matching prepared manual saves require review")
+                previous = candidates[0] if candidates else None
                 identifier = previous[0] if previous else str(uuid.uuid4())
                 if not previous:
                     db.execute("INSERT INTO manual_saves VALUES(?,?,?,?,?,?)",

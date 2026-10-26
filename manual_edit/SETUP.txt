@@ -1,15 +1,20 @@
-SỬA NGÀY / CAPTION TRÊN HTML — BẢN 2026-10-17
+SỬA THÔNG TIN REPOST TRÊN HTML — BẢN 2026-10-24
 
 1. DÙNG NGAY, CHƯA CẦN GAS
 Mở HTML mới, nhập 2211 trong Ord như cũ. Bật Edit, bấm bút ở góc video.
 Bấm ảnh vẫn mở link TikTok. Lưu local cập nhật ngay và không đổi vị trí cuộn.
 Ngày có lịch, ±1 ngày, Ngày vừa dùng, Lưu & sửa tiếp theo danh sách đang xem.
+Có thêm giờ chính xác đến giây, nhãn và ghi chú. Giá trị hiện hành của giờ và
+nhãn là dữ liệu công khai giống ngày/caption và có thể nằm trong data_*.js sau
+lớp giao diện 2211. Ghi chú vẫn riêng tư: không nhúng vào HTML/data_*.js và bản
+server và bản local chỉ được hiện trong giao diện sau khi GAS xác thực token.
+Nháp note chưa gửi vẫn ở local nhưng bị khóa; export backup riêng tư cũng cần xác thực.
 Nháp và thay đổi đã lưu nằm trong IndexedDB trên thiết bị/trình duyệt hiện tại.
 Không xóa dữ liệu trình duyệt/đổi trình duyệt khi còn chỉnh sửa chưa đồng bộ.
 Chế độ ẩn danh không thích hợp lưu lâu dài. Nên xuất backup JSON định kỳ.
 
 Lưu/Sync > Xuất backup JSON. Trong manager: Nhập backup chỉnh sửa HTML.
-Chỉ repost_date và repost_caption được nhập. Không thêm video, đổi thứ tự,
+Import manager cũ chỉ nhận repost_date và repost_caption. Không thêm video, đổi thứ tự,
 thay số liệu API hoặc phân loại. ID không còn trong DB được báo lại, không phục hồi.
 Xung đột với bản manager giữ nguyên local, ghi *.manual_edits.conflicts.json.
 Backup JSON chứa lịch sử chỉnh sửa; KHÔNG có token. Không đưa backup lên GitHub.
@@ -30,6 +35,12 @@ Tạo Apps Script project mới trên tài khoản Google của bạn.
   ALLOWED_ORIGINS: https://vhian2468.github.io
   Có thể thêm origin localhost chính xác, ngăn bằng dấu phẩy, nếu cần chạy thử.
   Không thêm dấu / ở cuối origin, không dùng dấu *.
+  MANUAL_FIELD_SCHEMA mặc định không có/0: bridge chỉ nhận ngày/caption.
+  Chỉ đặt MANUAL_FIELD_SCHEMA=1 sau khi toàn bộ client/luồng nhận đã hỗ trợ
+  schema 5 trường. Frontend luôn hỏi capability. Bridge mới phải trả đồng thời
+  authenticated=true, private_read_schema=1 và private_fields=['notes'] thì
+  trình duyệt mới mở ghi chú đã nhận từ server. Nếu bridge cũ, giờ/nhãn/note
+  tiếp tục nằm local và tuyệt đối không bị gửi lẫn vào request cũ.
 - Deploy > New deployment > Web app. Execute as: Me. Access: Anyone.
   Nếu tổ chức chặn chế độ Anyone thì phải đổi cấu hình/tài khoản phù hợp;
   đừng tắt kiểm tra token để chữa lỗi. Copy URL kết thúc bằng /exec.
@@ -56,8 +67,10 @@ sửa tay Edits không được đồng bộ ngược và có thể bị tái t�
 Đây là Google Sheets, không phải ghi trực tiếp vào file Excel trên máy.
 Không chia sẻ quyền chỉnh sửa bảng/project hoặc API_TOKEN cho người lạ.
 Nếu token lộ, đổi API_TOKEN trong Script properties rồi nhập token mới ở thiết bị.
-Frontend 2211 chỉ giấu giao diện, không bảo vệ dữ liệu public trên GitHub Pages.
-GAS có xác thực token riêng, chỉ chấp nhận hai trường chỉnh sửa trên.
+Frontend 2211 chỉ giấu giao diện, không bảo vệ ngày/giờ/caption/nhãn đã xuất
+trên GitHub Pages. GAS có xác thực token riêng cho ghi chú; token không đi vào
+JS/HTML công khai. Mặc định server chỉ chấp nhận ngày/caption;
+schema 5 trường phải được quản trị viên bật tường minh như trên.
 
 3. LƯU LOCAL / ĐỒNG BỘ ONLINE
 Lưu local thành công mới đóng hộp sửa. Gửi nền khi tab đang mở và có mạng.

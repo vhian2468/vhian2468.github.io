@@ -1,11 +1,14 @@
 import tkinter as tk
 from tiktok_manual_queue import commit_manager_json, status_title
+from tiktok_manual_fields import (ManagerJournal, install_session, private_editor,
+                                  conflict_editor, public_display_values)
+from tiktok_manager_view import (PAGE_SIZE, clamp_page, format_repost_time,
+                                 page_for_video, page_rows, select_rows)
+from tiktok_public_export import public_videos
 from tiktok_manual_upload import push as push_pc_manual
 from tiktok_manager_refresh import ManagerRefresh
 import tiktok_manual_rebase as form_rebase
 from tiktok_manual_queue_view import show as show_manual_queue
-from tiktok_hub_times import Display as HubTimeDisplay
-from tiktok_manual_edits import profile_for
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import json
 import os
@@ -43,6 +46,11 @@ def apply_source_overlay(data, input_path):
             for key in ('source_type', 'source_types', 'source_apis', 'source_updated_at', 'source_confidence', 'source_basis'):
                 if key in patch:
                     item[key] = patch[key]
+
+
+def public_manual_values(input_path):
+    """Read the converged public subset of an existing adjacent journal."""
+    return public_display_values(os.path.abspath(input_path))
 
 
 def sync_story_database(input_path, allow_deleted=False):
@@ -339,7 +347,7 @@ def generate_static_html(username, data_list):
             .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
             
             /* CARD DESIGN UPDATED */
-            .card { background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid #333; position: relative; display: flex; flex-direction: column; transition: 0.2s; }
+            .card { background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid #333; position: relative; display: flex; flex-direction: column; transition: 0.2s; content-visibility: auto; contain: layout paint style; contain-intrinsic-size: auto 560px; }
             .card:hover { transform: translateY(-3px); border-color: #666; }
             
             /* REPOST HIGHLIGHT */
@@ -357,8 +365,11 @@ def generate_static_html(username, data_list):
             
             /* DATE STYLES */
             .date-repost { color: var(--neon-green); font-size: 0.9em; font-weight: bold; margin-bottom: 4px; display: flex; align-items: center; gap: 5px; text-shadow: 0 0 5px rgba(57,255,20,0.4); }
+            .time-repost { color: #72f7ff; font-size: 0.88em; font-weight: bold; margin: -1px 0 5px; text-shadow: 0 0 6px rgba(114,247,255,0.45); }
             .caption-repost { color: var(--neon-yellow); font-size: 0.95em; font-weight: bold; margin-bottom: 8px; font-style: italic; border-left: 2px solid var(--neon-yellow); padding-left: 8px; line-height: 1.3; }
             .date-normal { color: var(--primary); font-size: 0.85em; font-weight: normal; margin-bottom: 4px; opacity: 0.9; }
+            .public-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0; }
+            .public-tag { color: #ffee00; border: 1px solid rgba(255,238,0,.62); background: rgba(255,238,0,.08); border-radius: 999px; padding: 2px 7px; font-size: .78em; font-weight: bold; text-shadow: 0 0 5px rgba(255,238,0,.4); }
 
             .nickname { font-weight: bold; font-size: 1rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px;}
             .uid { font-size: 0.85em; color: var(--text-sub); display: block; margin-bottom: 4px; }
@@ -441,7 +452,7 @@ def generate_static_html(username, data_list):
                     <button id="postFilter" aria-pressed="false" onclick="toggleTypeFilter('post')">Post</button>
                     <button id="storyFilter" aria-pressed="false" onclick="toggleTypeFilter('story')">Story</button>
                     <button id="repostFilter" aria-pressed="false" onclick="toggleTypeFilter('repost')">Repost</button>
-                    <button onclick="renderAll()" class="btn-danger">All</button>
+                    <button onclick="renderAll()" class="btn-danger" title="Giữ cửa sổ tối đa 240 thẻ để tránh lag">Cửa sổ</button>
                     <button onclick="scrollToTop()">⬆️ Top</button>
                     <button onclick="scrollToEnd()">⬇️ End</button> <!-- NEW: End Button -->
                 </div>
@@ -472,9 +483,15 @@ def generate_static_html(username, data_list):
         
         let fullData = [];
         let displayData = [];
+        let searchIndex = [];
+        let fullIndexById = new Map();
+        let displayIndexById = new Map();
         let renderedStart = 0;
         let renderedEnd = 0;
         const BATCH_SIZE = 40; 
+        const MAX_RENDERED_CARDS = 240;
+        let suppressScroll = false;
+        let lastScrollTop = 0;
         let captionOnly = false;
         const selectedTypes = new Set();
         let unlocked = false;
@@ -528,14 +545,61 @@ def generate_static_html(username, data_list):
             return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
+        function repostTimeText(v) {
+            const value = v && v.repost_time;
+            if (!value || typeof value !== 'object') return '';
+            const compact = text => {
+                const match = String(text || '').match(/^(\d{4}-\d\d-\d\d)T(\d\d:\d\d(?::\d\d)?)(?:Z|[.+-].*)?$/);
+                return match ? {day: match[1], time: match[2]} : null;
+            };
+            if (value.kind === 'exact') {
+                const point = compact(value.at);
+                return point ? point.time : '';
+            }
+            if (value.kind === 'range') {
+                const lower = compact(value.lower), upper = compact(value.upper);
+                if (!lower || !upper) return '';
+                return lower.day === upper.day ? `${lower.time} – ${upper.time}`
+                    : `${lower.day} ${lower.time} – ${upper.day} ${upper.time}`;
+            }
+            return '';
+        }
+
+        function publicTagsHtml(v) {
+            if (!Array.isArray(v && v.tags) || !v.tags.length) return '';
+            return `<div class="public-tags">${v.tags.map(tag => `<span class="public-tag">#${escapeHtml(String(tag).replace(/^#+/, ''))}</span>`).join('')}</div>`;
+        }
+
         async function startApp() {
             if(window.tiktokManualEditor) await window.tiktokManualEditor.init(fullData);
             document.getElementById('totalCount').innerText = fullData.length;
             displayData = [...fullData];
+            fullIndexById = new Map(fullData.map((video, index) => [String(video.id), index]));
+            searchIndex = fullData.map(searchableText);
+            rebuildDisplayIndex();
             renderSidebar();
             resetRender();
             renderDown(); 
             scrollArea.addEventListener('scroll', onScroll);
+        }
+
+        function searchableText(v) {
+            return [
+                v.nickname, v.date, v.repost_date, v.repost_caption, v.desc,
+                v.uniqueId, v.id, v.music_title, v.hashtags, v.source_type,
+                v.source_types, v.source_apis, repostTimeText(v), v.tags
+            ].map(value => String(value ?? '')).join('\u0000').toLocaleLowerCase('vi');
+        }
+
+        function refreshSearchIndexForIds(ids) {
+            for (const id of ids || []) {
+                const index = fullIndexById.get(String(id));
+                if (index !== undefined) searchIndex[index] = searchableText(fullData[index]);
+            }
+        }
+
+        function rebuildDisplayIndex() {
+            displayIndexById = new Map(displayData.map((video, index) => [String(video.id), index]));
         }
 
         function toggleSidebar() {
@@ -548,6 +612,7 @@ def generate_static_html(username, data_list):
             grid.innerHTML = '';
             renderedStart = 0;
             renderedEnd = 0;
+            lastScrollTop = 0;
         }
 
         function createCard(v) {
@@ -569,11 +634,13 @@ def generate_static_html(username, data_list):
                 </a>
                 <div class="info">
                     ${v.repost_date ? `<div class="date-repost">♻️ ${escapeHtml(v.repost_date)}</div>` : ''}
+                    ${repostTimeText(v) ? `<div class="time-repost">🕐 ${escapeHtml(repostTimeText(v))}</div>` : ''}
                     ${v.repost_caption ? `<div class="caption-repost">💬 ${escapeHtml(v.repost_caption)}</div>` : ''}
                     <div class="date-normal">📅 Tạo: ${escapeHtml(v.date)}</div>
                     <span class="nickname">${escapeHtml(v.nickname)}</span>
                     <span class="uid">@${escapeHtml(v.uniqueId)}</span>
                     <div class="desc" title="${escapeHtml(v.desc)}">${escapeHtml(v.desc)}</div>
+                    ${publicTagsHtml(v)}
                     <div class="metrics"><span>❤️ ${escapeHtml(v.digg || 0)}</span><span>💬 ${escapeHtml(v.comment || 0)}</span><span>🔄 ${escapeHtml(v.share || 0)}</span><span>▶ ${escapeHtml(v.play || 0)}</span></div>
                     ${musicHtml}
                 </div>`;
@@ -651,22 +718,52 @@ def generate_static_html(username, data_list):
         }
 
         function onScroll() {
+            if (suppressScroll) return;
             const st = scrollArea.scrollTop;
-            const sh = scrollArea.scrollHeight;
-            const ch = scrollArea.clientHeight;
-            if (st + ch >= sh - 600) renderDown();
-            if (st <= 200 && renderedStart > 0) renderUp();
+            const movingDown = st >= lastScrollTop;
+            lastScrollTop = st;
+            if (movingDown && st + scrollArea.clientHeight >= scrollArea.scrollHeight - 600) renderDown();
+            else if (!movingDown && st <= 200 && renderedStart > 0) renderUp();
+        }
+
+        function silenceProgrammaticScroll(callback) {
+            suppressScroll = true;
+            callback();
+            lastScrollTop = scrollArea.scrollTop;
+            requestAnimationFrame(() => {
+                lastScrollTop = scrollArea.scrollTop;
+                suppressScroll = false;
+            });
+        }
+
+        function trimRenderedTop() {
+            const excess = (renderedEnd - renderedStart) - MAX_RENDERED_CARDS;
+            if (excess <= 0) return;
+            const beforeHeight = scrollArea.scrollHeight;
+            const beforeTop = scrollArea.scrollTop;
+            for (let index = 0; index < excess && grid.firstElementChild; index++) grid.firstElementChild.remove();
+            renderedStart += excess;
+            const removedHeight = Math.max(0, beforeHeight - scrollArea.scrollHeight);
+            silenceProgrammaticScroll(() => { scrollArea.scrollTop = Math.max(0, beforeTop - removedHeight); });
+        }
+
+        function trimRenderedBottom() {
+            const excess = (renderedEnd - renderedStart) - MAX_RENDERED_CARDS;
+            if (excess <= 0) return;
+            for (let index = 0; index < excess && grid.lastElementChild; index++) grid.lastElementChild.remove();
+            renderedEnd -= excess;
         }
 
         function renderDown(forceCount = -1) {
             if (renderedEnd >= displayData.length) { loadingMsg.style.display = 'none'; return; }
-            let count = (forceCount > -1) ? forceCount : BATCH_SIZE;
-            let end = Math.min(renderedEnd + count, displayData.length);
-            const batch = displayData.slice(renderedEnd, end);
+            const requested = (forceCount > -1) ? forceCount : BATCH_SIZE;
+            const count = Math.min(Math.max(BATCH_SIZE, requested), MAX_RENDERED_CARDS);
+            const end = Math.min(renderedEnd + count, displayData.length);
             const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
+            displayData.slice(renderedEnd, end).forEach(v => fragment.appendChild(createCard(v)));
             grid.appendChild(fragment);
             renderedEnd = end;
+            trimRenderedTop();
             loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
         }
 
@@ -674,47 +771,57 @@ def generate_static_html(username, data_list):
             if (renderedStart <= 0) return;
             const oldScrollHeight = scrollArea.scrollHeight;
             const oldScrollTop = scrollArea.scrollTop;
-            let count = BATCH_SIZE;
-            let start = Math.max(0, renderedStart - count);
-            const batch = displayData.slice(start, renderedStart);
+            const start = Math.max(0, renderedStart - BATCH_SIZE);
             const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
+            displayData.slice(start, renderedStart).forEach(v => fragment.appendChild(createCard(v)));
             grid.insertBefore(fragment, grid.firstChild);
             renderedStart = start;
-            scrollArea.scrollTop = oldScrollTop + (scrollArea.scrollHeight - oldScrollHeight);
+            silenceProgrammaticScroll(() => {
+                scrollArea.scrollTop = oldScrollTop + (scrollArea.scrollHeight - oldScrollHeight);
+            });
+            trimRenderedBottom();
+            loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
+        }
+
+        function renderWindowAroundIndex(index, highlightId = '') {
+            if (!displayData.length) return;
+            const target = Math.max(0, Math.min(displayData.length - 1, Number(index) || 0));
+            const start = Math.max(0, Math.min(target - Math.floor(MAX_RENDERED_CARDS / 3), displayData.length - MAX_RENDERED_CARDS));
+            const end = Math.min(displayData.length, start + MAX_RENDERED_CARDS);
+            const fragment = document.createDocumentFragment();
+            displayData.slice(start, end).forEach(v => fragment.appendChild(createCard(v)));
+            grid.replaceChildren(fragment);
+            renderedStart = start;
+            renderedEnd = end;
+            loadingMsg.style.display = (renderedEnd >= displayData.length) ? 'none' : 'block';
+            requestAnimationFrame(() => {
+                const video = displayData[target];
+                const element = document.getElementById('card-' + (highlightId || video?.id || ''));
+                if (element) {
+                    silenceProgrammaticScroll(() => element.scrollIntoView({behavior:'auto', block:'center'}));
+                    element.classList.add('highlight');
+                    setTimeout(() => element.classList.remove('highlight'), 1200);
+                }
+            });
         }
 
         function renderAll() {
-            if (!confirm("⚠️ CẢNH BÁO: Hiển thị tất cả có thể gây lag!")) return;
-            loadingMsg.innerText = "Rendering all...";
-            setTimeout(() => { renderDown(displayData.length - renderedEnd); }, 50);
+            if (displayData.length <= MAX_RENDERED_CARDS) {
+                renderWindowAroundIndex(0);
+                return;
+            }
+            alert(`Chế độ tối ưu đang giữ tối đa ${MAX_RENDERED_CARDS} thẻ trên màn hình. Dùng tìm kiếm, ngày, Feed/Ord hoặc ±300 để tới vị trí khác mà không làm trình duyệt bị đơ.`);
         }
 
         function scrollOffset(amount) {
-            const cardHeight = 400; 
-            if (amount > 0) {
-                renderDown(amount);
-                setTimeout(() => scrollArea.scrollBy({ top: (amount/2)*cardHeight, behavior: 'smooth' }), 50);
-            } else {
-                scrollArea.scrollBy({ top: -((Math.abs(amount)/2)*cardHeight), behavior: 'smooth' });
-            }
+            const middle = Math.floor((renderedStart + renderedEnd) / 2);
+            renderWindowAroundIndex(middle + Number(amount || 0));
         }
 
         function jumpToId(vid) {
-            const index = displayData.findIndex(v => v.id === vid);
-            if (index === -1) { alert("Video không có trong danh sách lọc hiện tại!"); return; }
-            grid.innerHTML = '';
-            renderedStart = Math.max(0, index - 20); 
-            renderedEnd = renderedStart; 
-            renderDown(50);
-            setTimeout(() => {
-                const el = document.getElementById('card-' + vid);
-                if (el) {
-                    el.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    el.classList.add('highlight');
-                    setTimeout(() => el.classList.remove('highlight'), 2000);
-                }
-            }, 50);
+            const index = displayIndexById.get(String(vid));
+            if (index === undefined) { alert("Video không có trong danh sách lọc hiện tại!"); return; }
+            renderWindowAroundIndex(index, String(vid));
         }
 
         // --- NEW FUNCTIONS: Order Jump & End Scroll ---
@@ -747,22 +854,11 @@ def generate_static_html(username, data_list):
         }
 
         function scrollToEnd() {
-            resetRender();
-            
-            // Force render the last batch
-            renderedEnd = displayData.length;
-            renderedStart = Math.max(0, renderedEnd - 50); // Render 50 item cuối
-            
-            const batch = displayData.slice(renderedStart, renderedEnd);
-            const fragment = document.createDocumentFragment();
-            batch.forEach(v => fragment.appendChild(createCard(v)));
-            grid.appendChild(fragment);
-            
-            loadingMsg.style.display = 'none';
-            
-            setTimeout(() => {
+            if (!displayData.length) return;
+            renderWindowAroundIndex(displayData.length - 1);
+            requestAnimationFrame(() => silenceProgrammaticScroll(() => {
                 scrollArea.scrollTop = scrollArea.scrollHeight;
-            }, 50);
+            }));
         }
 
         function renderSidebar() {
@@ -824,22 +920,16 @@ def generate_static_html(username, data_list):
 
         function handleFilter() {
             if (!unlocked) return;
-            const term = searchInput.value.toLowerCase();
+            const term = searchInput.value.trim().toLocaleLowerCase('vi');
             const sortMode = sortSelect.value;
             resetRender();
             loadingMsg.style.display = 'block';
             
-            displayData = fullData.filter(v => (!selectedTypes.size || selectedTypes.has(contentType(v))) && (!captionOnly || String(v.repost_caption || '').trim()) && (
-                (v.nickname && v.nickname.toLowerCase().includes(term)) || 
-                (v.date && v.date.includes(term)) ||
-                (v.repost_date && v.repost_date.includes(term)) ||
-                (v.repost_caption && v.repost_caption.toLowerCase().includes(term)) ||
-                (v.desc && v.desc.toLowerCase().includes(term)) ||
-                (v.uniqueId && v.uniqueId.toLowerCase().includes(term)) ||
-                String(v.id || '').includes(term) ||
-                String(v.music_title || '').toLowerCase().includes(term) ||
-                String(v.hashtags || '').toLowerCase().includes(term)
-            ));
+            displayData = fullData.filter((v, index) =>
+                (!selectedTypes.size || selectedTypes.has(contentType(v))) &&
+                (!captionOnly || String(v.repost_caption || '').trim()) &&
+                (!term || searchIndex[index].includes(term))
+            );
             document.getElementById('totalCount').innerText = displayData.length + '/' + fullData.length;
 
             if (sortMode === 'feed') {
@@ -857,7 +947,8 @@ def generate_static_html(username, data_list):
             } else if (sortMode === 'newest_create') {
                 displayData.sort((a, b) => (BigInt(b.id) > BigInt(a.id)) ? 1 : -1);
             }
-            
+
+            rebuildDisplayIndex();
             renderSidebar();
             scrollArea.scrollTop = 0;
             renderDown();
@@ -885,6 +976,13 @@ class TikTokManagerApp:
         self.current_file = ""
         self.username = ""
         self.filtered_list = []
+        self.tree_page = 0
+        self.tree_page_size = PAGE_SIZE
+        self.tree_search_cache = {}
+        self.private_values = {}
+        self.private_signature = None
+        self.browse_anchor_vid = None
+        self.search_after_id = None
         
         # === LAYOUT ===
         # Top Frame: Actions
@@ -929,24 +1027,33 @@ class TikTokManagerApp:
         tk.Button(self.left_frame, text='Xem hàng chờ / xung đột ngày và caption',
                   command=lambda: show_manual_queue(self.root, self.current_file) if self.current_file
                   else messagebox.showinfo('Chọn database', 'Chọn file JSON trước.')).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text='Giờ / nhãn / ghi chú Hub (cửa sổ riêng)',
+        tk.Button(self.left_frame, text='Giờ / nhãn xuất web · ghi chú riêng (Hub)',
                   command=self.open_hub_manual).pack(anchor='w', padx=5, pady=3)
-        self.hub_time_display = HubTimeDisplay(r'D:\tiktok\tiktok-repost\V4-2026\mobile_capture\private_hub\main-journal.sqlite')
-        self.lbl_hub_time = tk.Label(self.left_frame, text='Giờ Hub local · chỉ hiển thị riêng tư')
+        self.lbl_hub_time = tk.Label(self.left_frame, text='Journal nhập tay local · chưa mở database')
         self.lbl_hub_time.pack(anchor='w', padx=5)
         
         # Search Bar (Fixed: No 'placeholder' arg)
         self.search_var = tk.StringVar()
-        self.search_var.trace("w", self.on_search)
+        self.search_var.trace_add("write", self.on_search)
         
         # Dùng Label thay cho placeholder
         tk.Label(self.left_frame, text="🔍 Username / nickname, ID, mô tả, caption, hashtag, ngày, music:").pack(anchor="w", padx=5)
         tk.Entry(self.left_frame, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
+
+        filter_row = tk.Frame(self.left_frame)
+        filter_row.pack(fill='x', padx=5, pady=(0, 4))
+        self.type_filter_vars = {kind: tk.BooleanVar(value=False) for kind in ('post', 'story', 'repost')}
+        for kind, label in (('post', 'Post'), ('story', 'Story'), ('repost', 'Repost')):
+            ttk.Checkbutton(filter_row, text=label, variable=self.type_filter_vars[kind],
+                            command=self.on_filter_change).pack(side='left', padx=(0, 8))
+        self.caption_filter_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filter_row, text='Có caption', variable=self.caption_filter_var,
+                        command=self.on_filter_change).pack(side='left')
         
         # Treeview (List)
-        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "order", "caption", "source_type", "hub_time"), show="headings", selectmode="extended")
-        self.tree.heading("hub_time", text="Giờ repost Hub (+07) · riêng tư")
-        self.tree.column("hub_time", width=350)
+        self.tree = ttk.Treeview(self.left_frame, columns=("feed_index", "date", "nickname", "repost_date", "repost_time", "order", "caption", "source_type", "tags", "notes"), show="headings", selectmode="extended")
+        self.tree.heading("repost_time", text="Giờ repost · xuất web")
+        self.tree.column("repost_time", width=230)
         self.tree.heading("source_type", text="Loại / Nguồn API")
         self.tree.column("source_type", width=180)
         self.tree.heading("feed_index", text="#")
@@ -955,6 +1062,8 @@ class TikTokManagerApp:
         self.tree.heading("caption", text="Repost Caption")
         self.tree.heading("repost_date", text="Ngày Repost")
         self.tree.heading("order", text="Ord")
+        self.tree.heading("tags", text="Nhãn · xuất web")
+        self.tree.heading("notes", text="Ghi chú · riêng tư")
         
         self.tree.column("feed_index", width=50)
         self.tree.column("date", width=90)
@@ -962,12 +1071,22 @@ class TikTokManagerApp:
         self.tree.column("caption", width=240)
         self.tree.column("repost_date", width=90)
         self.tree.column("order", width=50)
+        self.tree.column("tags", width=170)
+        self.tree.column("notes", width=220)
         
         self.tree.pack(fill="both", expand=True)
         horizontal = ttk.Scrollbar(self.left_frame, orient='horizontal', command=self.tree.xview)
         horizontal.pack(fill='x')
         self.tree.configure(xscrollcommand=horizontal.set)
         self.tree.bind("<<TreeviewSelect>>", self.on_select_item)
+        pager = ttk.Frame(self.left_frame)
+        pager.pack(fill='x', padx=5, pady=4)
+        self.btn_page_prev = ttk.Button(pager, text='◀ Trang trước', command=lambda: self.change_tree_page(-1))
+        self.btn_page_prev.pack(side='left')
+        self.lbl_tree_page = ttk.Label(pager, text='Chưa có dữ liệu', anchor='center')
+        self.lbl_tree_page.pack(side='left', fill='x', expand=True, padx=8)
+        self.btn_page_next = ttk.Button(pager, text='Trang sau ▶', command=lambda: self.change_tree_page(1))
+        self.btn_page_next.pack(side='right')
         
         # --- RIGHT: EDITOR ---
         right_shell = tk.Frame(self.paned)
@@ -999,8 +1118,10 @@ class TikTokManagerApp:
         tk.Button(self.form_frame, text='📅 Chọn ngày từ lịch', command=self.show_date_calendar).pack(anchor='e', pady=3)
         
         tk.Label(self.form_frame, text="Repost Caption:", bg="#f9f9f9").pack(anchor="w", pady=(10, 0))
-        self.entry_repost_cap = tk.Entry(self.form_frame)
+        self.entry_repost_cap = tk.Text(self.form_frame, wrap='word', height=5)
         self.entry_repost_cap.pack(fill="x", pady=2)
+        tk.Button(self.form_frame, text='Giờ / nhãn xuất web · ghi chú riêng', command=self.open_private_editor).pack(fill='x', pady=5)
+        tk.Button(self.form_frame, text='⚖ Đối chiếu xung đột nhập tay', command=lambda: conflict_editor(self)).pack(fill='x', pady=5)
 
         self.extra_entries = {}
         for key, label in (('uniqueId', 'Username'), ('nickname', 'Nickname'), ('desc', 'Mô tả / hashtag'), ('music_title', 'Tên nhạc'), ('music_id', 'Music ID (để mở link nhạc)')):
@@ -1021,6 +1142,59 @@ class TikTokManagerApp:
         self.selected_vid = None
         self.sync_refresh = ManagerRefresh()
         self.root.after(5000, self.check_external_update)
+
+    def _private_search_text(self, video):
+        values = self.private_values.get(str(video.get('id')), {})
+        time_text = format_repost_time(values.get('repost_time'))
+        return ' '.join((source_label(video), time_text,
+                         ' '.join(values.get('tags') or []),
+                         str(values.get('notes') or '')))
+
+    def refresh_private_projection(self):
+        session = getattr(self, 'manual_field_session', None)
+        self.private_values = session.display_values() if session is not None else {}
+        paths = (() if session is None else (str(session.path), str(session.path) + '-wal'))
+        self.private_signature = tuple(
+            (os.stat(path).st_mtime_ns, os.stat(path).st_size) if os.path.exists(path) else None
+            for path in paths)
+        self.tree_search_cache.clear()
+        conflicts = sum(bool(item.get('manual_conflicts')) for item in self.private_values.values())
+        if hasattr(self, 'lbl_hub_time'):
+            self.lbl_hub_time.config(text=(
+                f'Journal nhập tay local: {len(self.private_values)} video · '
+                f'{conflicts} video cần đối chiếu · chưa phải biên nhận Drive'))
+
+    def open_private_editor(self):
+        dialog = private_editor(self)
+        if dialog is not None:
+            def after_close(_event=None):
+                if _event is not None and _event.widget is not dialog:
+                    return
+                self.refresh_private_projection()
+                self.refresh_tree()
+            dialog.bind('<Destroy>', after_close, add='+')
+
+    def on_filter_change(self):
+        self.schedule_tree_refresh(reset_page=True)
+
+    def schedule_tree_refresh(self, reset_page=False):
+        if self.search_after_id is not None:
+            try:
+                self.root.after_cancel(self.search_after_id)
+            except tk.TclError:
+                pass
+        self.search_after_id = self.root.after(
+            250, lambda: self.refresh_tree(reset_page=reset_page))
+
+    def change_tree_page(self, delta):
+        target = clamp_page(self.tree_page + int(delta), len(self.filtered_list), self.tree_page_size)
+        if target == self.tree_page:
+            return
+        self.tree_page = target
+        self.refresh_tree(preserve_anchor=False)
+        _, _, visible = page_rows(self.filtered_list, self.tree_page, self.tree_page_size)
+        if visible:
+            self.browse_anchor_vid = str(visible[0]['id'])
 
     def check_external_update(self):
         try:
@@ -1155,14 +1329,17 @@ class TikTokManagerApp:
             messagebox.showerror('Không lưu được URL API', str(error))
 
     def refresh_hub_times(self):
-        if not self.current_file:
+        session = getattr(self, 'manual_field_session', None)
+        if not self.current_file or session is None:
             return
-        if self.hub_time_display.refresh(profile_for(self.current_file)):
-            # Update cells only: never reload a form or replace an unsaved draft.
-            for item in self.tree.get_children():
-                video = self.tree.item(item, 'tags')[0]
-                self.tree.set(item, 'hub_time', self.hub_time_display.values.get(video, ''))
-        self.lbl_hub_time.config(text=self.hub_time_display.status)
+        paths = (str(session.path), str(session.path) + '-wal')
+        signature = tuple(
+            (os.stat(path).st_mtime_ns, os.stat(path).st_size) if os.path.exists(path) else None
+            for path in paths)
+        if signature != self.private_signature:
+            # One scan only when SQLite/WAL changed; never query per 43k video.
+            self.refresh_private_projection()
+            self.refresh_tree()
 
     def open_hub_manual(self):
         script = r'D:\tiktok\tiktok-repost\V4-2026\mobile_capture\manual_view.py'
@@ -1426,8 +1603,8 @@ class TikTokManagerApp:
                 self.username = "unknown"
                 
             self.current_file = filename
-            if hasattr(self, 'hub_time_display'):
-                self.hub_time_display.refresh(profile_for(filename))
+            install_session(self, filename, loaded.version)
+            self.refresh_private_projection()
             self.loaded_version = loaded.version
             self.lbl_file.config(text=f"User: {self.username} | {len(self.data_list)} videos")
             
@@ -1435,6 +1612,10 @@ class TikTokManagerApp:
             self.data_list.sort(key=lambda x: x.get('feed_index', 999999))
             self.arrange_current_feed()
             self.selected_vid = None
+            self.browse_anchor_vid = None
+            self.tree_page = 0
+            if hasattr(self, 'tree_search_cache'):
+                self.tree_search_cache.clear()
             
             self.refresh_tree()
             if hasattr(self, 'sync_refresh'):
@@ -1448,43 +1629,56 @@ class TikTokManagerApp:
                 messagebox.showerror("Lỗi", f"Không đọc được file: {e}")
             return False
 
-    def refresh_tree(self):
-        # Clear tree
+    def refresh_tree(self, reset_page=False, preserve_anchor=True):
+        self.search_after_id = None
+        anchor = self.browse_anchor_vid if preserve_anchor else None
+        enabled_types = tuple(kind for kind, variable in self.type_filter_vars.items()
+                              if variable.get())
+        self.filtered_list = select_rows(
+            self.data_list, self.search_var.get(), enabled_types,
+            self.caption_filter_var.get(), source_getter=self._private_search_text,
+            search_cache=self.tree_search_cache)
+        if anchor and any(str(video['id']) == str(anchor) for video in self.filtered_list):
+            self.tree_page = page_for_video(
+                self.filtered_list, anchor, self.tree_page_size, self.tree_page)
+        elif reset_page:
+            self.tree_page = 0
+        self.tree_page, start, visible = page_rows(
+            self.filtered_list, self.tree_page, self.tree_page_size)
         for item in self.tree.get_children():
             self.tree.delete(item)
-            
-        term = self.search_var.get().lower()
-        
-        self.filtered_list = []
-        for v in self.data_list:
-            # Search filter
-            match = False
-            if term in source_label(v).lower(): match = True
-            if term in str(v.get('id', '')).lower(): match = True
-            if term in str(v.get('desc', '')).lower(): match = True
-            if term in str(v.get('nickname', '')).lower(): match = True
-            if term in str(v.get('repost_date', '')).lower(): match = True
-            for key in ('uniqueId', 'date', 'repost_caption', 'hashtags', 'music_title', 'music_id', 'repost_order', 'feed_index', 'source_type', 'source_types', 'source_apis'):
-                if term in str(v.get(key, '')).lower(): match = True
-            
-            if not term or match:
-                self.filtered_list.append(v)
-                
-        # Insert to tree
-        for v in self.filtered_list:
-            self.tree.insert("", "end", values=(
-                v.get('feed_index', ''),
-                v.get('date', ''),
-                '@' + v.get('uniqueId', '') + ' / ' + v.get('nickname', ''),
-                v.get('repost_date', ''),
-                v.get('repost_order', ''),
-                v.get('repost_caption', ''),
-                source_label(v),
-                self.hub_time_display.values.get(v['id'], '') if hasattr(self, 'hub_time_display') else ''
-            ), tags=(v['id'],))
+        for video in visible:
+            identifier = str(video['id'])
+            private = self.private_values.get(identifier, {})
+            conflicts = set(private.get('manual_conflicts') or [])
+            def private_text(field, value):
+                if field in conflicts:
+                    return '⚠ nhiều phương án'
+                return value
+            time_text = private_text('repost_time', format_repost_time(private.get('repost_time')))
+            tags = private_text('tags', ', '.join(private.get('tags') or []))
+            notes = private_text('notes', str(private.get('notes') or '').replace('\n', ' ')[:240])
+            row = self.tree.insert("", "end", values=(
+                video.get('feed_index', ''), video.get('date', ''),
+                '@' + video.get('uniqueId', '') + ' / ' + video.get('nickname', ''),
+                video.get('repost_date', ''), time_text, video.get('repost_order', ''),
+                video.get('repost_caption', ''), source_label(video), tags, notes,
+            ), tags=(identifier,))
+            if anchor == identifier:
+                self.tree.selection_set(row)
+                self.tree.focus(row)
+                self.tree.see(row)
+        total = len(self.filtered_list)
+        end = start + len(visible)
+        pages = max(1, (total + self.tree_page_size - 1) // self.tree_page_size)
+        self.lbl_tree_page.config(text=(
+            f'{start + 1 if total else 0}–{end} / {total} · trang {self.tree_page + 1}/{pages} '
+            f'· chỉ dựng tối đa {self.tree_page_size} dòng'))
+        self.btn_page_prev.config(state=('normal' if self.tree_page > 0 else 'disabled'))
+        self.btn_page_next.config(state=('normal' if end < total else 'disabled'))
 
     def on_search(self, *args):
-        self.refresh_tree()
+        self.schedule_tree_refresh(reset_page=True)
 
     def on_select_item(self, event):
         sel = self.tree.selection()
@@ -1496,6 +1690,8 @@ class TikTokManagerApp:
         
         v = self.data.get(item_id)
         if not v: return
+        if getattr(self, 'manual_field_session', None) is not None:
+            self.edit_field_bases = self.manual_field_session.selected_bases(item_id)
         self.edit_opening = {key: str(v.get(key, '') or '') for key in form_rebase.FIELDS}
         self.edit_opening_id = item_id
         
@@ -1505,8 +1701,9 @@ class TikTokManagerApp:
         self.entry_repost_date.delete(0, tk.END)
         self.entry_repost_date.insert(0, v.get('repost_date', ''))
         
-        self.entry_repost_cap.delete(0, tk.END)
-        self.entry_repost_cap.insert(0, v.get('repost_caption', ''))
+        self.entry_repost_cap.delete('1.0', tk.END)
+        self.entry_repost_cap.insert('1.0', v.get('repost_caption', ''))
+        self.browse_anchor_vid = item_id
         for key, entry in self.extra_entries.items():
             entry.delete(0, tk.END)
             entry.insert(0, v.get(key, ''))
@@ -1594,7 +1791,7 @@ class TikTokManagerApp:
                 raise ValueError('Thiếu bản gốc lúc mở video; giữ phần đang nhập để đối chiếu.')
             values = {key: entry.get().strip() for key, entry in self.extra_entries.items()}
             values.update(repost_date=self.entry_repost_date.get().strip(),
-                          repost_caption=self.entry_repost_cap.get().strip())
+                          repost_caption=self.entry_repost_cap.get('1.0', 'end-1c').strip())
             plan = form_rebase.prepare(self.current_file, self.selected_vid, self.edit_opening, values)
             choices = {}
             for field, versions in plan['conflicts'].items():
@@ -1603,8 +1800,15 @@ class TikTokManagerApp:
                     return True
                 choices[field] = choice
             selected = self.selected_vid
-            form_rebase.commit(plan, choices)
+            if getattr(self, 'manual_field_session', None) is None:
+                # A long-lived manager may predate journal initialization. The
+                # rebase plan pins the exact current database version, so
+                # attaching that version keeps the typed form without a bypass.
+                install_session(self, self.current_file, plan['version'])
+            form_rebase.commit(plan, choices, writer=self.manual_field_session.save)
             self.load_path(self.current_file, notify=False)
+            self.browse_anchor_vid = selected
+            self.refresh_tree()
             for row in self.tree.get_children():
                 if self.tree.item(row, 'tags')[0] == selected:
                     self.tree.selection_set(row)
@@ -1621,7 +1825,7 @@ class TikTokManagerApp:
         v = self.data[self.selected_vid]
         manual_fields = set(v.get('manual_fields', []))
         for key, value in (('repost_date', self.entry_repost_date.get().strip()),
-                           ('repost_caption', self.entry_repost_cap.get().strip())):
+                           ('repost_caption', self.entry_repost_cap.get('1.0', 'end-1c').strip())):
             if str(v.get(key, '') or '') != value:
                 manual_fields.add(key)
             v[key] = value
@@ -1720,7 +1924,7 @@ class TikTokManagerApp:
         if updates_count > 0:
             self.arrange_current_feed()
             self.refresh_tree()
-            if self.save_json_file():
+            if self.save_json_file(manual_source='pc_autofill'):
                 messagebox.showinfo("Hoàn tất", f"Đã tự động điền ngày cho {updates_count} video!")
         else:
             messagebox.showinfo("Thông báo", "Không tìm thấy khoảng trống nào giữa 2 video cùng ngày để điền.")
@@ -1736,7 +1940,7 @@ class TikTokManagerApp:
         
         # Save JS
         enrich_music_from_logs(self.data_list, default_api_logs())
-        export_data = [{key: value for key, value in v.items() if key != 'api_raw'} for v in self.data_list]
+        export_data = public_videos(self.data_list, self.private_values)
         js_content = f"window.tiktokData = {json.dumps(export_data, ensure_ascii=False)};"
         atomic_write(js_file, js_content)
             
@@ -1750,8 +1954,10 @@ class TikTokManagerApp:
         self.data_list = arrange_stories(self.data_list)
         for index, item in enumerate(self.data_list):
             item['feed_index'] = index
+        if hasattr(self, 'tree_search_cache'):
+            self.tree_search_cache.clear()
 
-    def save_json_file(self):
+    def save_json_file(self, manual_source='pc_manager'):
         if not self.current_file: return False
         try:
             # --- FIX: LUÔN LƯU DẠNG LIST (JSON MỚI) ---
@@ -1762,8 +1968,13 @@ class TikTokManagerApp:
                 raise ValueError('Database có ID trùng; không ghi file')
             if not hasattr(self, 'loaded_version'):
                 raise ValueError('Cần mở lại database để xác minh phiên bản trước khi lưu')
+            if getattr(self, 'manual_field_session', None) is None:
+                # Recover an older open window without asking the user to type
+                # again. ManagerJournal verifies the loaded checksum before any
+                # event or JSON intent is written; changed files still fail safe.
+                install_session(self, self.current_file, self.loaded_version)
             with database_lock(self.current_file):
-                committed = commit_manager_json(self.current_file, save_data, self.loaded_version,
+                committed = self.manual_field_session.save(save_data, self.loaded_version, source=manual_source,
                                         rolling_backup=self.current_file + '.manager.bak', label='manager')
                 self.loaded_version = committed.version
                 if hasattr(self, 'sync_refresh'):
@@ -1772,6 +1983,8 @@ class TikTokManagerApp:
                     self.root.title(status_title(self.current_file))
                 atomic_write(self.current_file + '.manager.state.json', json.dumps(
                     {'sha256': committed.version, 'edited_at': datetime.now().isoformat()}))
+            if hasattr(self, 'tree_search_cache'):
+                self.tree_search_cache.clear()
             return True
                 
             # print("Saved as LIST format.") # Debug
@@ -1795,7 +2008,7 @@ def export_automatically(input_path, output_dir=None, api_logs=None):
     data = arrange_stories(data)
     for index, item in enumerate(data):
         item['feed_index'] = index
-    export_data = [{key: value for key, value in v.items() if key != 'api_raw'} for v in data]
+    export_data = public_videos(data, public_manual_values(input_path))
     js_path = os.path.join(output_dir, f'data_{username}.js')
     html_path = os.path.join(output_dir, f'view_{username}.html')
     atomic_write(js_path, 'window.tiktokData = ' + json.dumps(export_data, ensure_ascii=False) + ';')

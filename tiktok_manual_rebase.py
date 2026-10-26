@@ -34,7 +34,7 @@ def prepare(path, video_id, opening, proposed):
                 video_id=video_id, changes=changes, conflicts=conflicts)
 
 
-def commit(plan, choices):
+def commit(plan, choices, *, writer=None):
     if set(choices) != set(plan["conflicts"]) or any(v not in ("local", "current") for v in choices.values()):
         raise ValueError("Cần chọn rõ từng trường xung đột trước khi lưu")
     data = copy.deepcopy(plan["data"])
@@ -50,8 +50,14 @@ def commit(plan, choices):
             manual.add(field)
     if manual:
         target["manual_fields"] = sorted(manual)
-    result = commit_manager_json(plan["path"], data, plan["version"],
-                                 rolling_backup=plan["path"]+".manager.bak", label="manager-form-rebase")
+    if writer is None:
+        result = commit_manager_json(plan["path"], data, plan["version"],
+                                     rolling_backup=plan["path"]+".manager.bak", label="manager-form-rebase")
+    else:
+        # A manager with the new local journal must not bypass its durable
+        # save intent during the explicit stale-form reconciliation path.
+        result = writer(data, plan["version"], source='pc_manager',
+                        rolling_backup=plan["path"]+".manager.bak", label="manager-form-rebase")
     atomic_json(plan["path"]+".manager.state.json", {"sha256": result.version})
     return result
 

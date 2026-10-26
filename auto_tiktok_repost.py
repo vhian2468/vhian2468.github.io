@@ -14,6 +14,13 @@ from contextlib import ExitStack
 from tiktok_database_guard import database_lock, snapshot, commit_bytes, validate_bytes, local_authority_is_current
 import tiktok_feed_authority as feed_state
 
+# Reconciliation implementation lives with the collector project so the
+# GitHub export folder stays free of private queue/runtime files.
+_V4_MODULES = r"D:\tiktok\tiktok-repost\V4-2026"
+if _V4_MODULES not in sys.path:
+    sys.path.insert(0, _V4_MODULES)
+import tiktok_publish_session as publish_sessions
+
 _CURRENT_VERSION = object()
 
 for _stream in (sys.stdout, sys.stderr):
@@ -40,6 +47,7 @@ PATH_GIT_PIPELINE = os.path.join(DIR_GIT, FILE_JSON_PIPELINE)
 COLLECTOR_SCRIPT = "test_api_log - V2.py"
 COLLECTOR_STATUS_PATH = os.path.join(DIR_V4, "collector_status.json")
 RUN_LOG_DIR = os.path.join(DIR_V4, "run_logs")
+PUBLISH_SESSIONS_DIR = os.path.join(DIR_V4, "publish_sessions")
 PIPELINE_STATUS_PATH = os.path.join(DIR_V4, 'pipeline_status.json')
 CURRENT_STEP = 'startup'
 
@@ -199,6 +207,257 @@ def atomic_copy_json(source, destination, label="JSON", *,
         return len(rows)
 
 
+def rotate_main_backups_after_preflight():
+    """Rotate rolling MAIN backups only when MAIN has new bytes.
+
+    The caller must first create the durable publish-session.  Source versions
+    are pinned here as an additional fail-closed check against a concurrent
+    writer between preflight and backup rotation.
+    """
+    with database_lock(PATH_GIT_JSON):
+        current = snapshot(PATH_GIT_JSON)
+    if current.data is None or current.version is None:
+        raise RuntimeError("MAIN không tồn tại sau preflight; không chạy collector")
+
+    first = snapshot(PATH_GIT_BACKUP1)
+    if first.version == current.version:
+        print("   ℹ️ MAIN không đổi; giữ nguyên bak1/bak2.")
+        return False
+    if first.data is not None:
+        atomic_copy_json(
+            PATH_GIT_BACKUP1,
+            PATH_GIT_BACKUP2,
+            "Backup bak2",
+            expected_source=first.version,
+            backup=True,
+        )
+        print("   ✅ Đã backup: bak1 -> bak2")
+    atomic_copy_json(
+        PATH_GIT_JSON,
+        PATH_GIT_BACKUP1,
+        "Backup bak1",
+        expected_source=current.version,
+        backup=True,
+    )
+    if snapshot(PATH_GIT_BACKUP1).version != current.version:
+        raise RuntimeError("Backup bak1 đọc lại không khớp MAIN; không chạy collector")
+    print("   ✅ Đã backup atomic: json hiện tại -> bak1")
+    return True
+
+
+def preflight_exact_collection_seed():
+    """Read-only proof that collector starts from exact MAIN bytes/Feed state."""
+    paths = sorted(
+        {os.path.normcase(os.path.realpath(path)) for path in (PATH_GIT_JSON, PATH_V4_JSON)}
+    )
+    with ExitStack() as locks:
+        for path in paths:
+            locks.enter_context(database_lock(path))
+        main = snapshot(PATH_GIT_JSON)
+        collector = snapshot(PATH_V4_JSON)
+        if main.data is None or collector.data is None or main.data != collector.data:
+            raise RuntimeError("Collector seed không phải exact MAIN; không xoay backup")
+        # Validate bytes before any backup generation can be consumed.
+        for label, value in (("MAIN", main.data), ("V4", collector.data)):
+            rows = validate_bytes(value)
+            if not isinstance(rows, list):
+                raise RuntimeError(f"{label} seed phải là List")
+        main_authority, _ = feed_state.inspect(PATH_GIT_JSON, main.version)
+        collector_authority, _ = feed_state.inspect(PATH_V4_JSON, collector.version)
+        if main_authority != collector_authority:
+            raise RuntimeError("Collector seed có Feed authority khác MAIN")
+        return main.version
+
+
+def prepare_publish_session(run_id):
+    """Preflight, rotate, then durably pin the session before collector Popen."""
+    preflight_exact_collection_seed()
+    # No PREPARED exists yet. A rotation failure is therefore retryable without
+    # leaving an unfinished session that blocks the next startup.
+    rotate_main_backups_after_preflight()
+    return publish_sessions.prepare_session(
+        sessions_root=PUBLISH_SESSIONS_DIR,
+        run_id=run_id,
+        destination_path=PATH_GIT_JSON,
+        collector_path=PATH_V4_JSON,
+        require_database_sha256=True,
+    )
+
+
+def unresolved_publish_run_ids():
+    """Return PREPARED sessions which do not have a durable COMPLETE receipt."""
+    unfinished = publish_sessions.discover_unfinished_sessions(
+        sessions_root=PUBLISH_SESSIONS_DIR,
+    )
+    return [item["run_id"] for item in unfinished]
+
+
+def _require_status_database_sha256(status):
+    expected = str(status.get("database_sha256", "")).lower()
+    with database_lock(PATH_V4_JSON):
+        actual = snapshot(PATH_V4_JSON).version
+    if len(expected) != 64 or expected != actual:
+        raise RuntimeError(
+            "collector_status thiếu/sai database_sha256; giữ nguyên cả hai, không publish"
+        )
+
+
+def _process_is_alive(pid):
+    """Read-only liveness check; permission errors fail closed as alive."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise RuntimeError("collector_status thiếu PID hợp lệ; không đóng session")
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            error = ctypes.get_last_error()
+            if error in (87, 1168):  # invalid PID / element not found
+                return False
+            if error == 5:  # access denied: process may exist, so fail closed
+                return True
+            raise OSError(error, "Không xác minh được collector PID")
+        try:
+            code = wintypes.DWORD()
+            if not get_exit_code(handle, ctypes.byref(code)):
+                raise OSError(ctypes.get_last_error(),
+                              "Không đọc được trạng thái collector PID")
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            close_handle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def resume_saved_publish_at_startup(run_id):
+    """Finish a proven saved session before allowing a new collector run."""
+    try:
+        with open(COLLECTOR_STATUS_PATH, "rb") as file:
+            status_bytes = file.read()
+        status = json.loads(status_bytes.decode("utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise RuntimeError(
+            "V4 có dữ liệu chưa publish nhưng thiếu collector_status hợp lệ; "
+            "giữ nguyên cả hai, không chạy collector mới"
+        ) from error
+    status_run_id = str(status.get("run_id", "")).strip()
+    if status_run_id != run_id:
+        raise RuntimeError(
+            "Publish-session dở không khớp collector receipt saved; "
+            "giữ nguyên cả hai, không chạy collector mới"
+        )
+    if status.get("status") != "saved":
+        try:
+            state = publish_sessions.session_state(
+                sessions_root=PUBLISH_SESSIONS_DIR,
+                run_id=run_id,
+            )
+            if state["state"] == "aborted_no_change":
+                return state
+            if state["state"] != "prepared":
+                raise publish_sessions.PublishSessionError(
+                    "Chỉ PREPARED mới được đóng no-change")
+            collector_pid = status.get("pid")
+            if _process_is_alive(collector_pid):
+                raise RuntimeError(
+                    "Collector của publish-session vẫn đang chạy; không mở phiên mới"
+                )
+            result = publish_sessions.abort_no_change_session(
+                sessions_root=PUBLISH_SESSIONS_DIR,
+                run_id=run_id,
+                collector_status_path=COLLECTOR_STATUS_PATH,
+                expected_status_sha256=hashlib.sha256(status_bytes).hexdigest(),
+                expected_collector_pid=collector_pid,
+            )
+        except publish_sessions.PublishSessionError as error:
+            raise RuntimeError(
+                "Collector chưa có receipt saved và V4/Feed không chứng minh exact base; "
+                "giữ nguyên cả hai, không chạy collector mới"
+            ) from error
+        except RuntimeError:
+            raise
+        print(
+            "   ✅ Đã đóng publish-session collector chết trước save: "
+            f"{run_id} · V4 exact base · không publish dữ liệu"
+        )
+        return result
+    _require_status_database_sha256(status)
+    try:
+        state = publish_sessions.session_state(
+            sessions_root=PUBLISH_SESSIONS_DIR,
+            run_id=run_id,
+        )
+        if state["state"] == "prepared":
+            publish_sessions.record_saved(
+                sessions_root=PUBLISH_SESSIONS_DIR,
+                run_id=run_id,
+                collector_status_path=COLLECTOR_STATUS_PATH,
+            )
+        result = publish_sessions.publish_session(
+            sessions_root=PUBLISH_SESSIONS_DIR,
+            run_id=run_id,
+            collector_status_path=COLLECTOR_STATUS_PATH,
+        )
+    except publish_sessions.PublishSessionError as error:
+        raise RuntimeError(
+            "Không chứng minh được phiên V4 dở dang thuộc exact MAIN; "
+            "giữ nguyên cả hai, không chạy collector mới"
+        ) from error
+    print(
+        "   ✅ Đã phục hồi publish-session trước khi chạy phiên mới: "
+        f"{result['count']} videos · Feed={result['feed_source']}"
+    )
+    return result
+
+
+def resume_unresolved_publish_sessions_at_startup():
+    """Resolve the sole proven interrupted run before any base selection."""
+    run_ids = unresolved_publish_run_ids()
+    if not run_ids:
+        return None
+    if len(run_ids) != 1:
+        raise RuntimeError(
+            f"Có {len(run_ids)} publish-session dở; cần đối chiếu, không chạy collector mới"
+        )
+    return resume_saved_publish_at_startup(run_ids[0])
+
+
+def seed_collector_from_main(*, git_count, v4_count, git_version, v4_version,
+                             git_authority, v4_authority):
+    """Seed V4 from verified MAIN after all unfinished sessions are resolved."""
+    if (v4_version is not None and v4_version != git_version
+            and (git_authority is None or v4_authority is None)):
+        raise RuntimeError(
+            "MAIN/V4 khác SHA nhưng thiếu Feed authority ở ít nhất một bên; "
+            "giữ nguyên cả hai để đối chiếu"
+        )
+    # atomic_copy_json enforces Feed authority. It accepts equal authority and
+    # a newer MAIN, but rejects a MAIN whose Feed proof is older than V4.
+    return atomic_copy_json(
+        PATH_GIT_JSON,
+        PATH_V4_JSON,
+        "Git -> V4",
+        expected_destination=v4_version,
+        expected_source=git_version,
+        backup=True,
+    )
+
+
 def parse_timeout(choice):
     if choice in ("", "y"):
         return 150
@@ -246,8 +505,16 @@ def has_valid_save_receipt(run_id, minimum_count):
         if receipt.get("run_id") != run_id or receipt.get("status") != "saved":
             return False
         receipt_count = int(receipt.get("count", -1))
-        actual_count = validate_json_file(PATH_V4_JSON, "V4 JSON theo save receipt")
-        return receipt_count == actual_count and actual_count >= minimum_count
+        with database_lock(PATH_V4_JSON):
+            actual_count = validate_json_file(PATH_V4_JSON, "V4 JSON theo save receipt")
+            actual_sha256 = snapshot(PATH_V4_JSON).version
+        receipt_sha256 = str(receipt.get("database_sha256", "")).lower()
+        return (
+            receipt_count == actual_count
+            and actual_count >= minimum_count
+            and len(receipt_sha256) == 64
+            and receipt_sha256 == actual_sha256
+        )
     except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
         return False
 
@@ -298,32 +565,33 @@ def main():
     mark_step('backup_and_sync')
 
     print("\n[Bước 1] Tiến hành Backup và Copy file JSON...")
+    # A crash may leave equal row counts, MAIN committed but V4 not mirrored,
+    # or other hash-only divergence. Resolve durable sessions before looking at
+    # counts/hashes for the next run.
+    resume_unresolved_publish_sessions_at_startup()
     
     with database_lock(PATH_GIT_JSON):
         git_count_before = validate_json_file(PATH_GIT_JSON, "Git JSON hiện tại")
-        git_version_before = snapshot(PATH_GIT_JSON).version
+        git_snapshot_before = snapshot(PATH_GIT_JSON)
+        git_version_before = git_snapshot_before.version
+        git_authority_before = feed_state.recover(PATH_GIT_JSON, git_version_before)
     print(f"   🔎 Git JSON hợp lệ: {git_count_before} videos")
 
     v4_count_before = None
     v4_version_before = None
+    v4_authority_before = None
     if os.path.exists(PATH_V4_JSON):
         try:
             with database_lock(PATH_V4_JSON):
                 v4_version_before = snapshot(PATH_V4_JSON).version
                 v4_count_before = validate_json_file(PATH_V4_JSON, "V4 JSON hiện tại")
+                v4_authority_before, _ = feed_state.inspect(PATH_V4_JSON, v4_version_before)
             print(f"   🔎 V4 JSON hợp lệ: {v4_count_before} videos")
         except RuntimeError as exc:
             invalid_backup = PATH_V4_JSON + datetime.now().strftime(".invalid-%Y%m%d_%H%M%S.bak")
             shutil.copy2(PATH_V4_JSON, invalid_backup)
             print(f"   ⚠️ {exc}")
             print(f"   ⚠️ Đã giữ file V4 lỗi tại: {invalid_backup}")
-
-    if os.path.exists(PATH_GIT_BACKUP1):
-        atomic_copy_json(PATH_GIT_BACKUP1, PATH_GIT_BACKUP2, "Backup bak2")
-        print("   ✅ Đã backup: bak1 -> bak2")
-
-    atomic_copy_json(PATH_GIT_JSON, PATH_GIT_BACKUP1, "Backup bak1")
-    print("   ✅ Đã backup atomic: json hiện tại -> bak1")
 
     # Khong de Git cu ghi de mot ban autosave V4 moi hon sau lan dung dot ngot.
     git_excluded = PATH_GIT_JSON + '.deleted_ids.json'
@@ -335,18 +603,18 @@ def main():
         temp_excluded = PATH_V4_JSON + '.deleted_ids.json.tmp'
         shutil.copy2(git_excluded, temp_excluded)
         os.replace(temp_excluded, PATH_V4_JSON + '.deleted_ids.json')
-    if choose_collection_base(git_count_before, v4_count_before, manager_edit_is_current()) == "v4":
-        collection_base_count = v4_count_before
-        print(
-            f"   🛟 Phục hồi phiên trước: giữ V4 vì có thêm "
-            f"{v4_count_before - git_count_before} videos chưa publish."
-        )
-    else:
-        atomic_copy_json(PATH_GIT_JSON, PATH_V4_JSON, "Git -> V4",
-                         expected_destination=v4_version_before, expected_source=git_version_before,
-                         backup=True)
-        collection_base_count = git_count_before
-        print("   ✅ Đã copy atomic: Git JSON -> V4 JSON thành công!")
+    # With no unresolved session, verified MAIN may seed V4. This also covers
+    # thumbnail/auto-HTML writes which intentionally have no manager-state file.
+    seed_collector_from_main(
+        git_count=git_count_before,
+        v4_count=v4_count_before,
+        git_version=git_version_before,
+        v4_version=v4_version_before,
+        git_authority=git_authority_before,
+        v4_authority=v4_authority_before,
+    )
+    collection_base_count = git_count_before
+    print("   ✅ Đã copy atomic: Git JSON -> V4 JSON thành công!")
 
     # BƯỚC 2: Chạy test_api_log
     print("\n[Bước 2] Chuẩn bị chạy 'test_api_log - V2.py'.")
@@ -366,12 +634,14 @@ def main():
             story_wait_seconds = int(wait_choice or '60')
             break
         print('   Hãy nhập số giây không âm.')
+    collector_run_id = f"auto-{os.getpid()}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    mark_step('publish_preflight', run_id=collector_run_id)
+    prepare_publish_session(collector_run_id)
     mark_step('collector')
 
     print("   ⚙️ Đang chạy 'test_api_log - V2.py'...")
     # Dùng CREATE_NEW_PROCESS_GROUP để có thể gửi tín hiệu ngắt (Ctrl+C) trên Windows an toàn
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-    collector_run_id = f"auto-{os.getpid()}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
     child_env = os.environ.copy()
     child_env["TIKTOK_RUN_ID"] = collector_run_id
     stop_request_path = os.path.join(RUN_LOG_DIR, collector_run_id + ".stop")
@@ -443,9 +713,28 @@ def main():
     # BƯỚC 3: V4 -> Git
     print("\n[Bước 3] Copy trả lại file JSON từ V4 về Git...")
     mark_step('publish_json')
-    atomic_copy_json(PATH_V4_JSON, PATH_GIT_JSON, "V4 -> Git",
-                     expected_destination=git_version_before, backup=True)
-    print("   ✅ Publish atomic thành công!")
+    publish_sessions.record_saved(
+        sessions_root=PUBLISH_SESSIONS_DIR,
+        run_id=collector_run_id,
+        collector_status_path=COLLECTOR_STATUS_PATH,
+    )
+    publish = publish_sessions.publish_session(
+        sessions_root=PUBLISH_SESSIONS_DIR,
+        run_id=collector_run_id,
+        collector_status_path=COLLECTOR_STATUS_PATH,
+    )
+    print(
+        "   ✅ Publish hợp nhất ba chiều thành công: "
+        f"{publish['count']} videos · Feed={publish['feed_source']} · "
+        f"xung đột cần đối chiếu={publish['conflicts']}"
+    )
+    # COMPLETE receipts without conflicts omit this optional field.
+    conflict_receipt = publish.get('conflict_receipt')
+    if conflict_receipt:
+        print("   ⚠️ Đã giữ đủ hai phương án tại: " + conflict_receipt)
+    if not publish['mirrored_to_collector']:
+        print("   ⚠️ MAIN đã publish nhưng chưa mirror về V4; lần chạy sau sẽ lấy MAIN làm nền. "
+              "Không xóa recovery artifact.")
     if sync_stories:
         sync_command = [sys.executable, '-u', 'tiktok_html_generator.py', '--sync-stories', '--input', FILE_JSON]
         if allow_deleted:
