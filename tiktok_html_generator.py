@@ -95,34 +95,8 @@ def _sync_story_database_locked(input_path, allow_deleted=False):
 
 
 def enrich_music_from_logs(data, log_paths):
-    mapping = {str(v['id']): v for v in data}
-    added = 0
-    for path in log_paths:
-        if not os.path.isfile(path):
-            continue
-        with open(path, encoding='utf-8-sig') as file:
-            for line in file:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                payload = record.get('data', record) if isinstance(record, dict) else record
-                items = payload.get('itemList', payload.get('data', [])) if isinstance(payload, dict) else payload
-                if not isinstance(items, list):
-                    continue
-                for raw in items:
-                    if not isinstance(raw, dict):
-                        continue
-                    current = mapping.get(str(raw.get('id', raw.get('aweme_id', ''))))
-                    music = raw.get('music') or {}
-                    if current is None or not isinstance(music, dict):
-                        continue
-                    music_id = str(music.get('id', music.get('mid', '')))
-                    if music_id.isdigit() and not current.get('music_id'):
-                        current['music_id'] = music_id
-                        current['music_title'] = music.get('title') or current.get('music_title', '')
-                        added += 1
-    return added
+    from tiktok_music_backfill import enrich_music_from_logs as backfill
+    return backfill(data, log_paths)
 
 
 def default_api_logs():
@@ -1009,27 +983,47 @@ class TikTokManagerApp:
         # --- LEFT: LIST & SEARCH ---
         self.left_frame = tk.Frame(self.paned)
         self.paned.add(self.left_frame, width=600)
-        tk.Button(self.left_frame, text="Phân loại / phục hồi post, story từ API log", command=self.recover_api_types).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text="Bổ sung loại chưa rõ từ log mới nhất (không sửa JSON gốc)", command=self.refresh_unknown_sources).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text="Phân loại tạm theo username (không sửa JSON gốc)", command=self.infer_unknown_sources).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text="Đồng bộ story của user hiện tại từ tiktok-story", command=self.sync_current_user_stories).pack(anchor='w', padx=5, pady=3)
-        manual_row = tk.Frame(self.left_frame)
-        manual_row.pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text='↔ Đồng bộ ngày/caption hai chiều', command=lambda: self.pull_manual_edits(two_way=True)).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text='▶ / ■ Tự đồng bộ ngày/caption', command=self.toggle_manual_sync).pack(anchor='w', padx=5, pady=3)
-        self.manual_sync_status = tk.Label(self.left_frame, text='Tự đồng bộ: tắt · chỉ gửi chỉnh sửa đã lưu', wraplength=300, justify='left')
+        # Frequent controls remain directly accessible; maintenance is collapsed
+        # by default so the video list has room without losing any action.
+        self.quick_actions = tk.Frame(self.left_frame)
+        self.quick_actions.pack(fill='x', padx=5, pady=(0, 4))
+        self.quick_actions.columnconfigure(0, weight=1)
+        self.quick_actions.columnconfigure(1, weight=1)
+        self.advanced_visible = False
+        self.advanced_frame = ttk.LabelFrame(self.left_frame, text='Nâng cao · API log / GAS / backup')
+        self.advanced_frame.columnconfigure(0, weight=1)
+        self.advanced_frame.columnconfigure(1, weight=1)
+
+        def toggle_advanced():
+            self.advanced_visible = not self.advanced_visible
+            if self.advanced_visible:
+                self.advanced_frame.pack(fill='x', padx=5, pady=(0, 4), before=self.manual_sync_status)
+                self.advanced_toggle.configure(text='▾ Nâng cao (7) · thu gọn')
+            else:
+                self.advanced_frame.pack_forget()
+                self.advanced_toggle.configure(text='▸ Nâng cao (7)')
+
+        tk.Button(self.quick_actions, text='↔ Đồng bộ ngày/caption hai chiều', command=lambda: self.pull_manual_edits(two_way=True), wraplength=265).grid(row=0, column=0, sticky='ew', padx=(0, 3), pady=2)
+        tk.Button(self.quick_actions, text='▶ / ■ Tự đồng bộ ngày/caption', command=self.toggle_manual_sync, wraplength=265).grid(row=0, column=1, sticky='ew', padx=(3, 0), pady=2)
+        tk.Button(self.quick_actions, text='Đồng bộ story của user hiện tại từ tiktok-story', command=self.sync_current_user_stories, wraplength=265).grid(row=1, column=0, sticky='ew', padx=(0, 3), pady=2)
+        tk.Button(self.quick_actions, text='Giờ / nhãn xuất web · ghi chú riêng (Hub)', command=self.open_hub_manual, wraplength=265).grid(row=1, column=1, sticky='ew', padx=(3, 0), pady=2)
+        tk.Button(self.quick_actions, text='Xem hàng chờ / xung đột ngày và caption',
+                  command=lambda: show_manual_queue(self.root, self.current_file) if self.current_file
+                  else messagebox.showinfo('Chọn database', 'Chọn file JSON trước.'), wraplength=265).grid(row=2, column=0, sticky='ew', padx=(0, 3), pady=2)
+        self.advanced_toggle = tk.Button(self.quick_actions, text='▸ Nâng cao (7)', command=toggle_advanced)
+        self.advanced_toggle.grid(row=2, column=1, sticky='ew', padx=(3, 0), pady=2)
+
+        tk.Button(self.advanced_frame, text='Phân loại / phục hồi post, story từ API log', command=self.recover_api_types, wraplength=265).grid(row=0, column=0, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Bổ sung loại chưa rõ từ log mới nhất (không sửa JSON gốc)', command=self.refresh_unknown_sources, wraplength=265).grid(row=0, column=1, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Phân loại tạm theo username (không sửa JSON gốc)', command=self.infer_unknown_sources, wraplength=265).grid(row=1, column=0, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Nhập backup chỉnh sửa HTML', command=self.import_manual_backup, wraplength=265).grid(row=1, column=1, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Nhận ngày/caption từ GAS', command=self.pull_manual_edits, wraplength=265).grid(row=2, column=0, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Gửi ngày/caption PC lên GAS', command=lambda: self.pull_manual_edits(send_only=True), wraplength=265).grid(row=2, column=1, sticky='ew', padx=3, pady=2)
+        tk.Button(self.advanced_frame, text='Cài URL API (GAS) cho HTML', command=self.configure_manual_url, wraplength=540).grid(row=3, column=0, columnspan=2, sticky='ew', padx=3, pady=2)
+        self.manual_sync_status = tk.Label(self.left_frame, text='Tự đồng bộ: tắt · chỉ gửi chỉnh sửa đã lưu', wraplength=560, justify='left')
         self.manual_sync_status.pack(anchor='w', padx=5)
         self.root.bind('<Destroy>', self.stop_manual_sync_on_close, add='+')
-        tk.Button(manual_row, text='Nhận ngày/caption từ GAS', command=self.pull_manual_edits).pack(side='left')
-        tk.Button(manual_row, text='Gửi ngày/caption PC lên GAS', command=lambda: self.pull_manual_edits(send_only=True)).pack(side='left')
-        tk.Button(manual_row, text='Nhập backup chỉnh sửa HTML', command=self.import_manual_backup).pack(side='left', padx=5)
-        tk.Button(self.left_frame, text='Cài URL API (GAS) cho HTML', command=self.configure_manual_url).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text='Xem hàng chờ / xung đột ngày và caption',
-                  command=lambda: show_manual_queue(self.root, self.current_file) if self.current_file
-                  else messagebox.showinfo('Chọn database', 'Chọn file JSON trước.')).pack(anchor='w', padx=5, pady=3)
-        tk.Button(self.left_frame, text='Giờ / nhãn xuất web · ghi chú riêng (Hub)',
-                  command=self.open_hub_manual).pack(anchor='w', padx=5, pady=3)
-        self.lbl_hub_time = tk.Label(self.left_frame, text='Journal nhập tay local · chưa mở database')
+        self.lbl_hub_time = tk.Label(self.left_frame, text='Journal nhập tay local · chưa mở database', wraplength=560, justify='left')
         self.lbl_hub_time.pack(anchor='w', padx=5)
         
         # Search Bar (Fixed: No 'placeholder' arg)
@@ -1488,7 +1482,9 @@ class TikTokManagerApp:
                 excluded = set()
             profile = self.username.removesuffix('_all')
             recovered, added = recover_sources(self.data_list, default_api_logs(), normalize_repost, excluded, profile)
-            self.data_list = arrange_stories(recovered)
+            # Historical log recovery is not a new verified Feed capture.
+            # Existing IDs retain order; new recovered IDs append for review.
+            self.data_list = recovered
             for index, item in enumerate(self.data_list):
                 item['feed_index'] = index
             self.data = {v['id']: v for v in self.data_list}
@@ -1939,7 +1935,7 @@ class TikTokManagerApp:
         js_file = os.path.join(output_dir, f"data_{self.username}.js")
         
         # Save JS
-        enrich_music_from_logs(self.data_list, default_api_logs())
+        enrich_music_from_logs(self.data_list, default_api_logs)
         export_data = public_videos(self.data_list, self.private_values)
         js_content = f"window.tiktokData = {json.dumps(export_data, ensure_ascii=False)};"
         atomic_write(js_file, js_content)
@@ -1951,7 +1947,8 @@ class TikTokManagerApp:
         webbrowser.open(html_file)
 
     def arrange_current_feed(self):
-        self.data_list = arrange_stories(self.data_list)
+        # UI refresh/edit/export is not a new API capture. Preserve saved order
+        # across story expiry; verified capture/projection owns Feed arrangement.
         for index, item in enumerate(self.data_list):
             item['feed_index'] = index
         if hasattr(self, 'tree_search_cache'):
@@ -2004,8 +2001,8 @@ def export_automatically(input_path, output_dir=None, api_logs=None):
     username = base[5:-5] if base.startswith('data_') and base.endswith('.json') else os.path.splitext(base)[0]
     output_dir = output_dir or os.path.dirname(os.path.abspath(input_path))
     os.makedirs(output_dir, exist_ok=True)
-    added = enrich_music_from_logs(data, default_api_logs() if api_logs is None else api_logs)
-    data = arrange_stories(data)
+    added = enrich_music_from_logs(data, default_api_logs if api_logs is None else api_logs)
+    # Export the saved Feed, not a new wall-clock interpretation of story expiry.
     for index, item in enumerate(data):
         item['feed_index'] = index
     export_data = public_videos(data, public_manual_values(input_path))

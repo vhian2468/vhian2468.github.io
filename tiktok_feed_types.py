@@ -10,6 +10,74 @@ KNOWN_TYPES = {'/api/post/item_list/': 'post', '/api/story/item_list/': 'story',
 LOCAL_ZONE = timezone(timedelta(hours=7))
 
 
+def authoritative_anchor_order(previous, source, selected):
+    """Apply a newer observed spine without moving unobserved history to tail.
+
+    ``source`` is the ordered, verified set observed by the new capture.  IDs
+    absent from it are not deletion evidence: contiguous old blocks stay next
+    to their nearest old anchors whenever those anchors still have a compatible
+    order in the new spine. A prefix with one surviving successor stays just
+    before it; a suffix with one predecessor stays just after it. If the new
+    spine reverses both anchors, retaining
+    the old gap is impossible; that block falls back to the legacy tail policy
+    instead of changing the meaning of the verified source order.
+
+    New IDs are admitted only when explicitly selected.  The function is pure
+    and deliberately independent of browser/capture mechanics so PC and APK can
+    use the same fixture contract.
+    """
+    if len(previous) != len(set(previous)) or len(source) != len(set(source)):
+        raise ValueError("Feed contains duplicate IDs")
+    selected = set(selected)
+    source_set = set(source)
+    if selected - source_set:
+        raise ValueError("Selection outside source")
+
+    previous_set = set(previous)
+    spine = [value for value in source if value in previous_set or value in selected]
+    present = set(spine)
+    positions = {value: index for index, value in enumerate(spine)}
+    before, after, deferred = {}, {}, []
+
+    # Work from the immutable previous order.  Each unobserved contiguous block
+    # has at most one predecessor/successor that occurs in the new spine.
+    index = 0
+    while index < len(previous):
+        if previous[index] in present:
+            index += 1
+            continue
+        start = index
+        while index < len(previous) and previous[index] not in present:
+            index += 1
+        block = previous[start:index]
+        left = previous[start - 1] if start and previous[start - 1] in present else None
+        right = previous[index] if index < len(previous) and previous[index] in present else None
+
+        if left is not None and right is not None:
+            if positions[left] >= positions[right]:
+                deferred.extend(block)
+                continue
+            before.setdefault(right, []).extend(block)
+        elif right is not None:
+            # A hidden prefix still has a known successor. Newly observed
+            # leading IDs remain ahead of this block, next to that successor.
+            before.setdefault(right, []).extend(block)
+        elif left is not None:
+            after.setdefault(left, []).extend(block)
+        else:
+            # No common neighbor: retain the old block after the new spine.
+            deferred.extend(block)
+    result = []
+    for identifier in spine:
+        result.extend(before.get(identifier, ()))
+        result.append(identifier)
+        result.extend(after.get(identifier, ()))
+    result.extend(deferred)
+    if len(result) != len(set(result)):
+        raise ValueError("Anchor merge produced duplicate IDs")
+    return result
+
+
 def api_type(url):
     path = urlsplit(url).path.rstrip('/') + '/'
     if path == '/api/prefetch/explore/item_list/':
